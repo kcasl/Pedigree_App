@@ -1,3 +1,0 @@
-cd D:\Projects\Pedigree_App\front\pedigree_app
-npx react-native doctor
-npx react-native run-android
