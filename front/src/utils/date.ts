@@ -1,0 +1,14 @@
+export function nowIso(): string {
+  return new Date().toISOString();
+}
+
+export function formatKoreanDate(isoOrDateString?: string): string {
+  if (!isoOrDateString) return '';
+  const d = new Date(isoOrDateString);
+  if (Number.isNaN(d.getTime())) return isoOrDateString;
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}.${m}.${day}`;
+}
+
