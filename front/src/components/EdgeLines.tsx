@@ -5,6 +5,7 @@ import type { Edge, PositionedNode } from '../utils/pedigreeLayout';
 type Props = {
   edges: Edge[];
   nodeById: Record<string, PositionedNode>;
+  spousePairs?: Array<{ aId: string; bId: string }>;
   strokeWidth?: number;
   color?: string;
 };
@@ -21,7 +22,13 @@ function lineStyle(x: number, y: number, w: number, h: number, color: string, st
   };
 }
 
-export function EdgeLines({ edges, nodeById, strokeWidth = 2, color = '#111827' }: Props) {
+export function EdgeLines({
+  edges,
+  nodeById,
+  spousePairs = [],
+  strokeWidth = 2,
+  color = '#111827',
+}: Props) {
   // Draw connectors grouped by child so only a parent pair(couple) is connected per child.
   const lines: React.ReactNode[] = [];
   const gap = 24; // 카드와 선이 겹쳐서 가려지는 문제를 줄이기 위한 여유 간격
@@ -217,6 +224,25 @@ export function EdgeLines({ edges, nodeById, strokeWidth = 2, color = '#111827' 
           color,
           strokeWidth,
         )}
+      />,
+    );
+  });
+
+  // 배우자 연결선: 자녀 유무와 무관하게 카드 하단에서 항상 연결
+  spousePairs.forEach((pair, idx) => {
+    const a = nodeById[pair.aId];
+    const b = nodeById[pair.bId];
+    if (!a || !b) return;
+
+    const ax = a.x + a.width / 2;
+    const bx = b.x + b.width / 2;
+    const y = Math.max(a.y + a.height, b.y + b.height) + 10;
+    const left = Math.min(ax, bx);
+    const width = Math.max(strokeWidth, Math.abs(ax - bx));
+    lines.push(
+      <View
+        key={`spouse_${idx}_${pair.aId}_${pair.bId}`}
+        style={lineStyle(left, y - strokeWidth / 2, width, strokeWidth, color, strokeWidth)}
       />,
     );
   });

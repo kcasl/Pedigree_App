@@ -11,7 +11,10 @@
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "^2.2.0",
+    "@react-native-google-signin/google-signin": "^16.1.1",
     "@react-native/new-app-screen": "0.83.1",
+    "buffer": "^6.0.3",
+    "pako": "^2.1.0",
     "react": "19.2.0",
     "react-native": "0.83.1",
     "react-native-gesture-handler": "^2.30.0",

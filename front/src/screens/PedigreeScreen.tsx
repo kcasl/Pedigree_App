@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -13,18 +13,35 @@ import { PersonDetailModal } from '../components/PersonDetailModal';
 import { EdgeLines } from '../components/EdgeLines';
 import { PersonNodeCard } from '../components/PersonNodeCard';
 import type { ParentType, Person, PersonId } from '../types/pedigree';
+import { API_BASE_URL } from '../config/api';
 import { nowIso } from '../utils/date';
 import { buildPedigreeLayout } from '../utils/pedigreeLayout';
+import pako from 'pako';
+import { Buffer } from 'buffer';
 
 type PendingAdd =
   | { kind: 'parent'; childId: PersonId; parentType: ParentType }
   | { kind: 'sibling'; ofId: PersonId }
-  | { kind: 'child'; parentId: PersonId; parentRole: ParentType }
+  | { kind: 'child'; parentId: PersonId }
   | { kind: 'spouse'; ofId: PersonId }
   | { kind: 'paternalPlus' }
   | { kind: 'maternalPlus' };
 
-const PEDIGREE_STORAGE_KEY = 'pedigree.people.v1';
+type AuthSession = {
+  googleSub: string;
+  accessToken?: string;
+  email?: string;
+};
+
+type Props = {
+  auth?: AuthSession;
+};
+
+type SyncStatus = 'idle' | 'syncing' | 'synced' | 'offline' | 'error';
+type PendingPatchPayload = {
+  compressed: true;
+  payload_b64: string;
+};
 
 function createSelfPerson(): Person {
   return {
@@ -44,6 +61,7 @@ function createInitialPeople(): Record<PersonId, Person> {
   const self: Person = {
     ...createSelfPerson(),
     createdAt,
+    gender: 'unknown',
     fatherId,
     motherId,
   };
@@ -52,16 +70,19 @@ function createInitialPeople(): Record<PersonId, Person> {
     id: fatherId,
     name: '아버지',
     createdAt,
+    gender: 'male',
   };
   const mother: Person = {
     id: motherId,
     name: '어머니',
     createdAt,
+    gender: 'female',
   };
   const child: Person = {
     id: childId,
     name: '자녀',
     createdAt,
+    gender: 'unknown',
     fatherId: self.id,
   };
 
@@ -90,9 +111,36 @@ function parseStoredPeople(raw: string | null): Record<PersonId, Person> | null 
   }
 }
 
-export function PedigreeScreen() {
+function inferParentRole(next: Record<PersonId, Person>, parentId: PersonId): ParentType {
+  const parent = next[parentId];
+  if (parent?.gender === 'male') return 'father';
+  if (parent?.gender === 'female') return 'mother';
+
+  const hasFatherLink = Object.values(next).some(p => p.fatherId === parentId);
+  if (hasFatherLink) return 'father';
+  const hasMotherLink = Object.values(next).some(p => p.motherId === parentId);
+  if (hasMotherLink) return 'mother';
+
+  return 'father';
+}
+
+export function PedigreeScreen({ auth }: Props) {
   const [peopleById, setPeopleById] = useState<Record<PersonId, Person>>(createInitialPeople);
   const [isHydrated, setIsHydrated] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>('idle');
+  const remoteSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSyncedPeopleRef = useRef<Record<PersonId, Person>>({});
+  const deletedIdsRef = useRef<Set<PersonId>>(new Set());
+  const queueRef = useRef<PendingPatchPayload[]>([]);
+  const isFlushingRef = useRef(false);
+  const localStorageKey = useMemo(
+    () => (auth?.googleSub ? `pedigree.people.${auth.googleSub}.v1` : 'pedigree.people.guest.v1'),
+    [auth?.googleSub],
+  );
+  const queueStorageKey = useMemo(
+    () => (auth?.googleSub ? `pedigree.queue.${auth.googleSub}.v1` : 'pedigree.queue.guest.v1'),
+    [auth?.googleSub],
+  );
 
   const self = peopleById.self;
 
@@ -103,20 +151,112 @@ export function PedigreeScreen() {
   const [pendingAdd, setPendingAdd] = useState<PendingAdd | null>(null);
   const [editingId, setEditingId] = useState<PersonId | null>(null);
   const [detailId, setDetailId] = useState<PersonId | null>(null);
+  const [settingsVisible, setSettingsVisible] = useState(false);
 
   const selectedDetail = detailId ? peopleById[detailId] : undefined;
+
+  const persistQueue = async () => {
+    try {
+      await AsyncStorage.setItem(queueStorageKey, JSON.stringify(queueRef.current));
+    } catch {
+      // 큐 저장 실패는 치명적이지 않으므로 무시
+    }
+  };
+
+  const flushQueue = async () => {
+    if (!auth?.googleSub || !auth.accessToken) return;
+    if (isFlushingRef.current) return;
+    if (queueRef.current.length === 0) {
+      setSyncStatus('synced');
+      return;
+    }
+
+    isFlushingRef.current = true;
+    setSyncStatus('syncing');
+    try {
+      while (queueRef.current.length > 0) {
+        const head = queueRef.current[0];
+        const res = await fetch(`${API_BASE_URL}/v1/pedigree/${encodeURIComponent(auth.googleSub)}`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${auth.accessToken}`,
+          },
+          body: JSON.stringify(head),
+        });
+        if (!res.ok) {
+          setSyncStatus(res.status >= 500 ? 'offline' : 'error');
+          break;
+        }
+        queueRef.current.shift();
+        await persistQueue();
+      }
+      if (queueRef.current.length === 0) {
+        setSyncStatus('synced');
+      }
+    } catch {
+      setSyncStatus('offline');
+    } finally {
+      isFlushingRef.current = false;
+    }
+  };
 
   useEffect(() => {
     let mounted = true;
     const hydrate = async () => {
+      let localPeople: Record<PersonId, Person> | null = null;
       try {
-        const raw = await AsyncStorage.getItem(PEDIGREE_STORAGE_KEY);
-        const restored = parseStoredPeople(raw);
-        if (mounted && restored) {
-          setPeopleById(restored);
+        const raw = await AsyncStorage.getItem(localStorageKey);
+        localPeople = parseStoredPeople(raw);
+        if (mounted && localPeople) {
+          setPeopleById(localPeople);
+          lastSyncedPeopleRef.current = localPeople;
+        }
+
+        const queueRaw = await AsyncStorage.getItem(queueStorageKey);
+        if (queueRaw) {
+          const parsedQueue = JSON.parse(queueRaw) as PendingPatchPayload[];
+          if (Array.isArray(parsedQueue)) {
+            queueRef.current = parsedQueue.filter(
+              item => item?.compressed === true && typeof item.payload_b64 === 'string',
+            );
+          }
+        } else {
+          queueRef.current = [];
         }
       } catch {
-        // 저장소 접근 실패 시 기본 템플릿으로 계속 진행
+        // 로컬 저장소 접근 실패 시 기본 템플릿으로 계속 진행
+      }
+
+      if (auth?.googleSub && auth.accessToken) {
+        try {
+          setSyncStatus('syncing');
+          const res = await fetch(`${API_BASE_URL}/v1/pedigree/${encodeURIComponent(auth.googleSub)}`, {
+            method: 'GET',
+            headers: {
+              Authorization: `Bearer ${auth.accessToken}`,
+            },
+          });
+          if (res.ok) {
+            const data = (await res.json()) as { people_by_id?: Record<PersonId, Person> };
+            const remotePeopleRaw = data.people_by_id ?? {};
+            const remotePeople = parseStoredPeople(JSON.stringify(remotePeopleRaw));
+            if (mounted && remotePeople) {
+              setPeopleById(remotePeople);
+              lastSyncedPeopleRef.current = remotePeople;
+            } else if (mounted && !localPeople) {
+              const initial = createInitialPeople();
+              setPeopleById(initial);
+              lastSyncedPeopleRef.current = initial;
+            }
+            if (mounted) setSyncStatus('synced');
+          } else if (mounted) {
+            setSyncStatus('error');
+          }
+        } catch {
+          // 서버 조회 실패 시 로컬/기본 템플릿 사용
+          if (mounted) setSyncStatus('offline');
+        }
       } finally {
         if (mounted) setIsHydrated(true);
       }
@@ -125,77 +265,73 @@ export function PedigreeScreen() {
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [auth?.accessToken, auth?.googleSub, localStorageKey, queueStorageKey]);
 
   useEffect(() => {
     if (!isHydrated) return;
-    AsyncStorage.setItem(PEDIGREE_STORAGE_KEY, JSON.stringify(peopleById)).catch(() => {
+    AsyncStorage.setItem(localStorageKey, JSON.stringify(peopleById)).catch(() => {
       // 저장 실패는 UX를 막지 않고 무시
     });
-  }, [isHydrated, peopleById]);
+  }, [isHydrated, localStorageKey, peopleById]);
 
-  const setParent = (childId: PersonId, parentType: ParentType, parentId: PersonId) => {
-    setPeopleById(prev => {
-      const child = prev[childId];
-      if (!child) return prev;
-      return {
-        ...prev,
-        [childId]: {
-          ...child,
-          ...(parentType === 'father' ? { fatherId: parentId } : { motherId: parentId }),
-        },
-      };
-    });
-  };
+  useEffect(() => {
+    if (!isHydrated) return;
+    if (!auth?.googleSub || !auth.accessToken) return;
 
-  const addSibling = (ofId: PersonId, newPersonId: PersonId) => {
-    setPeopleById(prev => {
-      const base = prev[ofId];
-      if (!base) return prev;
-      if (!base.fatherId && !base.motherId) return prev;
-      return {
-        ...prev,
-        [newPersonId]: {
-          ...prev[newPersonId],
-          fatherId: base.fatherId,
-          motherId: base.motherId,
-        },
-      };
-    });
-  };
+    if (remoteSaveTimer.current) {
+      clearTimeout(remoteSaveTimer.current);
+    }
+    remoteSaveTimer.current = setTimeout(() => {
+      setSyncStatus('syncing');
+      const lastSynced = lastSyncedPeopleRef.current;
+      const upserts: Record<PersonId, Person> = {};
+      const deletes = Array.from(deletedIdsRef.current);
 
-  const addChild = (parentId: PersonId, parentRole: ParentType, newPersonId: PersonId) => {
-    setPeopleById(prev => {
-      const parent = prev[parentId];
-      if (!parent) return prev;
-      return {
-        ...prev,
-        [newPersonId]: {
-          ...prev[newPersonId],
-          ...(parentRole === 'father' ? { fatherId: parentId } : { motherId: parentId }),
-        },
-      };
-    });
-  };
+      for (const [id, person] of Object.entries(peopleById)) {
+        const prev = lastSynced[id];
+        if (!prev || JSON.stringify(prev) !== JSON.stringify(person)) {
+          upserts[id] = person;
+        }
+      }
 
-  const setSpousePair = (aId: PersonId, bId: PersonId) => {
-    setPeopleById(prev => {
-      const a = prev[aId];
-      const b = prev[bId];
-      if (!a || !b) return prev;
-      return {
-        ...prev,
-        [aId]: {
-          ...a,
-          spouseId: bId,
-        },
-        [bId]: {
-          ...b,
-          spouseId: aId,
-        },
+      for (const prevId of Object.keys(lastSynced)) {
+        if (!peopleById[prevId] && !deletes.includes(prevId)) {
+          deletes.push(prevId);
+        }
+      }
+
+      if (Object.keys(upserts).length === 0 && deletes.length === 0) {
+        setSyncStatus('synced');
+        return;
+      }
+
+      const gz = pako.gzip(JSON.stringify({ upserts, deletes }));
+      const payloadB64 = Buffer.from(gz).toString('base64');
+      const nextPatch: PendingPatchPayload = {
+        compressed: true,
+        payload_b64: payloadB64,
       };
-    });
-  };
+
+      queueRef.current.push(nextPatch);
+      // 큐에 담은 시점을 기준으로 다음 diff를 계산하도록 기준점 갱신
+      lastSyncedPeopleRef.current = peopleById;
+      deletedIdsRef.current.clear();
+      persistQueue().finally(() => {
+        flushQueue();
+      });
+    }, 900);
+
+    return () => {
+      if (remoteSaveTimer.current) clearTimeout(remoteSaveTimer.current);
+    };
+  }, [auth?.accessToken, auth?.googleSub, isHydrated, peopleById]);
+
+  useEffect(() => {
+    if (!isHydrated) return;
+    if (!auth?.googleSub || !auth.accessToken) return;
+    if (queueRef.current.length === 0) return;
+    flushQueue();
+  }, [auth?.accessToken, auth?.googleSub, isHydrated]);
 
   const deletePerson = (id: PersonId) => {
     if (id === 'self') return;
@@ -203,6 +339,7 @@ export function PedigreeScreen() {
       if (!prev[id]) return prev;
       const next: Record<PersonId, Person> = { ...prev };
       delete next[id];
+      deletedIdsRef.current.add(id);
       // detach links from remaining people
       for (const p of Object.values(next)) {
         if (p.fatherId === id) p.fatherId = undefined;
@@ -218,18 +355,33 @@ export function PedigreeScreen() {
       selfId: 'self',
       // 위쪽(조상)으로 계속 추가해도 충분히 배치되도록 여유를 크게 잡음
       maxAncestorDepth: 6,
-      maxDescendantDepth: 3,
+      maxDescendantDepth: 8,
       // 한 줄에 노드가 늘어나면 자동으로 카드/간격을 살짝 줄이는 튜닝 활성화
       autoTune: true,
       cardWidth: 176,
-      cardHeight: 122,
+      cardHeight: 138,
       colGap: 44,
       rowGap: 230,
       padding: 40,
     });
   }, [peopleById]);
 
-  const MIN_SCALE = 0.5;
+  const spousePairs = useMemo(() => {
+    const pairs: Array<{ aId: PersonId; bId: PersonId }> = [];
+    const seen = new Set<string>();
+    for (const p of Object.values(peopleById)) {
+      if (!p.spouseId) continue;
+      const a = p.id < p.spouseId ? p.id : p.spouseId;
+      const b = p.id < p.spouseId ? p.spouseId : p.id;
+      const key = `${a}__${b}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      pairs.push({ aId: a, bId: b });
+    }
+    return pairs;
+  }, [peopleById]);
+
+  const MIN_SCALE = 0.25;
   const MAX_SCALE = 2.8;
   const clampScaleOnJs = (v: number) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, v));
 
@@ -313,7 +465,7 @@ export function PedigreeScreen() {
       case 'sibling':
         return '형제/자매 추가';
       case 'child':
-        return pendingAdd.parentRole === 'father' ? '자녀 추가(부 기준)' : '자녀 추가(모 기준)';
+        return '자녀 추가';
       case 'spouse':
         return '배우자 추가';
       case 'paternalPlus':
@@ -328,31 +480,84 @@ export function PedigreeScreen() {
   const onSubmitNewPerson = (person: Person) => {
     const action = pendingAdd;
     if (!action) return;
+    setPeopleById(prev => {
+      const next: Record<PersonId, Person> = {
+        ...prev,
+        [person.id]: person,
+      };
 
-    setPeopleById(prev => ({
-      ...prev,
-      [person.id]: person,
-    }));
-
-    if (action.kind === 'parent') {
-      setParent(action.childId, action.parentType, person.id);
-    } else if (action.kind === 'sibling') {
-      // requires parents
-      const base = peopleById[action.ofId];
-      if (!base?.fatherId && !base?.motherId) {
-        Alert.alert('형제 추가 불가', '부모 정보가 있어야 형제를 추가할 수 있어요.');
-      } else {
-        addSibling(action.ofId, person.id);
+      if (action.kind === 'parent') {
+        const child = next[action.childId];
+        if (child) {
+          const otherParentId =
+            action.parentType === 'father' ? child.motherId : child.fatherId;
+          next[action.childId] = {
+            ...child,
+            ...(action.parentType === 'father'
+              ? { fatherId: person.id }
+              : { motherId: person.id }),
+          };
+          if (otherParentId && next[otherParentId]) {
+            next[person.id] = { ...next[person.id], spouseId: otherParentId };
+            next[otherParentId] = { ...next[otherParentId], spouseId: person.id };
+          }
+        }
+      } else if (action.kind === 'sibling') {
+        const base = next[action.ofId];
+        if (base?.fatherId || base?.motherId) {
+          next[person.id] = {
+            ...next[person.id],
+            fatherId: base.fatherId,
+            motherId: base.motherId,
+          };
+        } else {
+          Alert.alert('형제 추가 불가', '부모 정보가 있어야 형제를 추가할 수 있어요.');
+        }
+      } else if (action.kind === 'child') {
+        const parent = next[action.parentId];
+        if (parent) {
+          const spouseId = parent.spouseId;
+          const inferredRole = inferParentRole(next, action.parentId);
+          next[person.id] = {
+            ...next[person.id],
+            ...(inferredRole === 'father'
+              ? { fatherId: action.parentId }
+              : { motherId: action.parentId }),
+            ...(spouseId
+              ? inferredRole === 'father'
+                ? { motherId: spouseId }
+                : { fatherId: spouseId }
+              : null),
+          };
+        }
+      } else if (action.kind === 'spouse') {
+        const base = next[action.ofId];
+        if (base) {
+          next[action.ofId] = { ...base, spouseId: person.id };
+          next[person.id] = { ...next[person.id], spouseId: action.ofId };
+        }
+      } else if (action.kind === 'paternalPlus' && self.fatherId) {
+        const base = next[self.fatherId];
+        if (base?.fatherId || base?.motherId) {
+          next[person.id] = {
+            ...next[person.id],
+            fatherId: base.fatherId,
+            motherId: base.motherId,
+          };
+        }
+      } else if (action.kind === 'maternalPlus' && self.motherId) {
+        const base = next[self.motherId];
+        if (base?.fatherId || base?.motherId) {
+          next[person.id] = {
+            ...next[person.id],
+            fatherId: base.fatherId,
+            motherId: base.motherId,
+          };
+        }
       }
-    } else if (action.kind === 'child') {
-      addChild(action.parentId, action.parentRole, person.id);
-    } else if (action.kind === 'spouse') {
-      setSpousePair(action.ofId, person.id);
-    } else if (action.kind === 'paternalPlus') {
-      addSibling(self.fatherId!, person.id);
-    } else if (action.kind === 'maternalPlus') {
-      addSibling(self.motherId!, person.id);
-    }
+
+      return next;
+    });
 
     setPendingAdd(null);
   };
@@ -367,6 +572,7 @@ export function PedigreeScreen() {
           ...existing,
           // id/createdAt은 유지하고 나머지 필드만 갱신
           name: person.name,
+          gender: person.gender,
           phone: person.phone,
           birthDate: person.birthDate,
           photoUri: person.photoUri,
@@ -380,10 +586,26 @@ export function PedigreeScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>족보</Text>
-        <Text style={styles.headerSub}>
-          나(중앙) 기준 · 친가(왼쪽) / 외가(오른쪽) 대칭 정렬
-        </Text>
+        <View style={styles.headerTopRow}>
+          <Text style={styles.headerTitle}>족보</Text>
+          <Pressable style={styles.settingsBtn} onPress={() => setSettingsVisible(true)}>
+            <Text style={styles.settingsBtnText}>설정</Text>
+          </Pressable>
+        </View>
+        <Text style={styles.headerSub}>나(중앙) 기준 · 친가(왼쪽) / 외가(오른쪽) 대칭 정렬</Text>
+        {auth?.googleSub ? (
+          <Text style={styles.syncText}>
+            {syncStatus === 'syncing'
+              ? '동기화 중...'
+              : syncStatus === 'synced'
+                ? '서버 동기화 완료'
+                : syncStatus === 'offline'
+                  ? '오프라인 모드 (로컬 저장 중)'
+                  : syncStatus === 'error'
+                    ? '동기화 오류 (재시도 예정)'
+                    : '동기화 대기'}
+          </Text>
+        ) : null}
       </View>
 
       <View style={styles.stage}>
@@ -399,7 +621,7 @@ export function PedigreeScreen() {
             ]}
           >
             {/* 연결선 */}
-            <EdgeLines edges={layout.edges} nodeById={layout.nodeById} />
+            <EdgeLines edges={layout.edges} nodeById={layout.nodeById} spousePairs={spousePairs} />
 
             {/* 노드 */}
             {layout.nodes.map(n => {
@@ -517,27 +739,16 @@ export function PedigreeScreen() {
               <Text style={styles.sheetItemText}>배우자 추가</Text>
             </Pressable>
 
-            <Text style={styles.sheetHint}>자녀 추가 시, 이 인물이 자녀의 “부/모”인지 선택</Text>
-            <View style={styles.sheetRow}>
-              <Pressable
-                style={[styles.sheetItem, styles.sheetHalf]}
-                onPress={() => {
-                  setActionVisible(false);
-                  setPendingAdd({ kind: 'child', parentId: selectedId, parentRole: 'father' });
-                }}
-              >
-                <Text style={styles.sheetItemText}>자녀(부 기준)</Text>
-              </Pressable>
-              <Pressable
-                style={[styles.sheetItem, styles.sheetHalf]}
-                onPress={() => {
-                  setActionVisible(false);
-                  setPendingAdd({ kind: 'child', parentId: selectedId, parentRole: 'mother' });
-                }}
-              >
-                <Text style={styles.sheetItemText}>자녀(모 기준)</Text>
-              </Pressable>
-            </View>
+            <Text style={styles.sheetHint}>배우자가 있으면 자동으로 부모 2명 연결</Text>
+            <Pressable
+              style={styles.sheetItem}
+              onPress={() => {
+                setActionVisible(false);
+                setPendingAdd({ kind: 'child', parentId: selectedId });
+              }}
+            >
+              <Text style={styles.sheetItemText}>자녀 추가</Text>
+            </Pressable>
 
             {selectedId !== 'self' ? (
               <Pressable
@@ -560,6 +771,7 @@ export function PedigreeScreen() {
       <AddPersonModal
         visible={!!pendingAdd}
         title={addTitle}
+        auth={auth}
         onClose={() => setPendingAdd(null)}
         onSubmit={onSubmitNewPerson}
       />
@@ -568,6 +780,7 @@ export function PedigreeScreen() {
         visible={editingId != null}
         title="정보 수정"
         initialPerson={editingId ? peopleById[editingId] : undefined}
+        auth={auth}
         onClose={() => setEditingId(null)}
         onSubmit={onSubmitEditPerson}
       />
@@ -594,6 +807,25 @@ export function PedigreeScreen() {
             : undefined
         }
       />
+
+      <Modal
+        transparent
+        visible={settingsVisible}
+        animationType="fade"
+        onRequestClose={() => setSettingsVisible(false)}
+      >
+        <Pressable style={styles.sheetBackdrop} onPress={() => setSettingsVisible(false)}>
+          <Pressable style={styles.settingsSheet} onPress={() => {}}>
+            <Text style={styles.settingsTitle}>기타 설정 (임시)</Text>
+            <Text style={styles.settingsDesc}>- 알림 설정 (준비 중)</Text>
+            <Text style={styles.settingsDesc}>- 백업/복원 (준비 중)</Text>
+            <Text style={styles.settingsDesc}>- 계정 관리 (준비 중)</Text>
+            <Pressable style={styles.settingsCloseBtn} onPress={() => setSettingsVisible(false)}>
+              <Text style={styles.settingsCloseBtnText}>닫기</Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -618,11 +850,35 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: '900',
   },
+  headerTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
   headerSub: {
     marginTop: 4,
     color: '#6b7280',
     fontSize: 12,
     fontWeight: '600',
+  },
+  settingsBtn: {
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  settingsBtnText: {
+    color: '#111827',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  syncText: {
+    marginTop: 6,
+    color: '#6b7280',
+    fontSize: 11,
+    fontWeight: '700',
   },
   stage: {
     flex: 1,
@@ -770,5 +1026,41 @@ const styles = StyleSheet.create({
   },
   dangerText: {
     color: '#b91c1c',
+  },
+  settingsSheet: {
+    marginHorizontal: 16,
+    marginTop: 120,
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    padding: 16,
+    gap: 8,
+  },
+  settingsTitle: {
+    color: '#111827',
+    fontSize: 15,
+    fontWeight: '900',
+    marginBottom: 6,
+  },
+  settingsDesc: {
+    color: '#374151',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  settingsCloseBtn: {
+    marginTop: 10,
+    alignSelf: 'flex-end',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  settingsCloseBtnText: {
+    color: '#111827',
+    fontSize: 12,
+    fontWeight: '800',
   },
 });

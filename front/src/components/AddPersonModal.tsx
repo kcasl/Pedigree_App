@@ -15,16 +15,18 @@ import {
   type CameraOptions,
   type ImageLibraryOptions,
 } from 'react-native-image-picker';
-import type { Person } from '../types/pedigree';
+import type { GenderType, Person } from '../types/pedigree';
 import { nowIso } from '../utils/date';
 import { createId } from '../utils/id';
 import { ensureCameraPermission, ensurePhotoPermission } from '../utils/permissions';
+import { API_BASE_URL } from '../config/api';
 
 type Props = {
   visible: boolean;
   title: string;
   onClose: () => void;
   onSubmit: (person: Person) => void;
+  auth?: { googleSub: string; accessToken?: string };
   /**
    * 수정 모드일 때 기존 값을 주입합니다.
    * - id/createdAt는 유지
@@ -51,6 +53,7 @@ export function AddPersonModal({
   onClose,
   onSubmit,
   initialPerson,
+  auth,
 }: Props) {
   const [name, setName] = useState(initialPerson?.name ?? '');
   const [phone, setPhone] = useState(initialPerson?.phone ?? '');
@@ -59,6 +62,7 @@ export function AddPersonModal({
     initialPerson?.photoUri,
   );
   const [note, setNote] = useState(initialPerson?.note ?? '');
+  const [gender, setGender] = useState<GenderType>(initialPerson?.gender ?? 'unknown');
 
   // 모달을 "추가/수정"으로 번갈아 쓸 때 초기값이 바뀌면 폼도 동기화
   useEffect(() => {
@@ -68,6 +72,7 @@ export function AddPersonModal({
     setBirthDate(initialPerson?.birthDate ?? '');
     setPhotoUri(initialPerson?.photoUri);
     setNote(initialPerson?.note ?? '');
+    setGender(initialPerson?.gender ?? 'unknown');
   }, [visible, initialPerson?.id]);
 
   const canSave = useMemo(() => name.trim().length > 0, [name]);
@@ -78,6 +83,7 @@ export function AddPersonModal({
     setBirthDate(initialPerson?.birthDate ?? '');
     setPhotoUri(initialPerson?.photoUri);
     setNote(initialPerson?.note ?? '');
+    setGender(initialPerson?.gender ?? 'unknown');
   };
 
   const pickFromGallery = async () => {
@@ -90,7 +96,14 @@ export function AddPersonModal({
       return;
     }
     const uri = res.assets?.[0]?.uri;
-    if (uri) setPhotoUri(uri);
+    if (uri) {
+      if (auth?.googleSub && auth.accessToken) {
+        const uploaded = await uploadPhotoToServer(uri, auth.googleSub, auth.accessToken);
+        setPhotoUri(uploaded ?? uri);
+      } else {
+        setPhotoUri(uri);
+      }
+    }
   };
 
   const takePhoto = async () => {
@@ -103,7 +116,43 @@ export function AddPersonModal({
       return;
     }
     const uri = res.assets?.[0]?.uri;
-    if (uri) setPhotoUri(uri);
+    if (uri) {
+      if (auth?.googleSub && auth.accessToken) {
+        const uploaded = await uploadPhotoToServer(uri, auth.googleSub, auth.accessToken);
+        setPhotoUri(uploaded ?? uri);
+      } else {
+        setPhotoUri(uri);
+      }
+    }
+  };
+
+  const uploadPhotoToServer = async (
+    uri: string,
+    googleSub: string,
+    accessToken: string,
+  ): Promise<string | null> => {
+    try {
+      const form = new FormData();
+      form.append('google_sub', googleSub);
+      form.append('file', {
+        uri,
+        name: `photo_${Date.now()}.jpg`,
+        type: 'image/jpeg',
+      } as unknown as Blob);
+
+      const res = await fetch(`${API_BASE_URL}/v1/uploads/photo`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: form,
+      });
+      if (!res.ok) return null;
+      const data = (await res.json()) as { url?: string };
+      return data.url ?? null;
+    } catch {
+      return null;
+    }
   };
 
   const submit = () => {
@@ -120,6 +169,7 @@ export function AddPersonModal({
           birthDate: birthDate.trim() || undefined,
           photoUri,
           note: note.trim() || undefined,
+          gender,
         }
       : {
           id: createId('person'),
@@ -129,6 +179,7 @@ export function AddPersonModal({
           createdAt: nowIso(),
           photoUri,
           note: note.trim() || undefined,
+          gender,
         };
 
     onSubmit(person);
@@ -169,6 +220,60 @@ export function AddPersonModal({
                 placeholderTextColor="#64748b"
                 style={styles.input}
               />
+            </View>
+
+            <View style={styles.field}>
+              <Text style={styles.label}>성별</Text>
+              <View style={styles.genderRow}>
+                <Pressable
+                  onPress={() => setGender('male')}
+                  style={[
+                    styles.genderBtn,
+                    gender === 'male' && styles.genderBtnActive,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.genderBtnText,
+                      gender === 'male' && styles.genderBtnTextActive,
+                    ]}
+                  >
+                    남성
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => setGender('female')}
+                  style={[
+                    styles.genderBtn,
+                    gender === 'female' && styles.genderBtnActive,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.genderBtnText,
+                      gender === 'female' && styles.genderBtnTextActive,
+                    ]}
+                  >
+                    여성
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => setGender('unknown')}
+                  style={[
+                    styles.genderBtn,
+                    gender === 'unknown' && styles.genderBtnActive,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.genderBtnText,
+                      gender === 'unknown' && styles.genderBtnTextActive,
+                    ]}
+                  >
+                    미정
+                  </Text>
+                </Pressable>
+              </View>
             </View>
 
             <View style={styles.field}>
@@ -326,6 +431,32 @@ const styles = StyleSheet.create({
   noteInput: {
     minHeight: 72,
     textAlignVertical: 'top',
+  },
+  genderRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  genderBtn: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    backgroundColor: '#ffffff',
+    paddingVertical: 10,
+  },
+  genderBtnActive: {
+    borderColor: '#2563eb',
+    backgroundColor: '#eff6ff',
+  },
+  genderBtnText: {
+    color: '#374151',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  genderBtnTextActive: {
+    color: '#1d4ed8',
   },
   photoRow: {
     flexDirection: 'row',

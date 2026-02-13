@@ -64,6 +64,16 @@ export function PersonDetailModal({ visible, person, onClose, onEdit, onDelete }
               <Text style={styles.value}>{person?.birthDate ?? '-'}</Text>
             </View>
             <View style={styles.section}>
+              <Text style={styles.label}>성별</Text>
+              <Text style={styles.value}>
+                {person?.gender === 'male'
+                  ? '남성'
+                  : person?.gender === 'female'
+                    ? '여성'
+                    : '-'}
+              </Text>
+            </View>
+            <View style={styles.section}>
               <Text style={styles.label}>비고</Text>
               <Text style={styles.value}>{person?.note ?? '-'}</Text>
             </View>
