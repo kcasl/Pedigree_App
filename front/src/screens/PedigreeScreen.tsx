@@ -15,6 +15,7 @@ import { PersonNodeCard } from '../components/PersonNodeCard';
 import type { ParentType, Person, PersonId } from '../types/pedigree';
 import { API_BASE_URL } from '../config/api';
 import { nowIso } from '../utils/date';
+import { buildKinshipLabels } from '../utils/kinship';
 import { buildPedigreeLayout } from '../utils/pedigreeLayout';
 import pako from 'pako';
 import { Buffer } from 'buffer';
@@ -31,10 +32,14 @@ type AuthSession = {
   googleSub: string;
   accessToken?: string;
   email?: string;
+  name?: string;
 };
 
 type Props = {
   auth?: AuthSession;
+  onRequestLogout?: () => void | Promise<void>;
+  onRequestSwitchAccount?: () => void | Promise<void>;
+  onRequestLinkGoogle?: () => void | Promise<void>;
 };
 
 type SyncStatus = 'idle' | 'syncing' | 'synced' | 'offline' | 'error';
@@ -94,6 +99,11 @@ function createInitialPeople(): Record<PersonId, Person> {
   };
 }
 
+function createSelfOnlyPeople(): Record<PersonId, Person> {
+  const self = createSelfPerson();
+  return { [self.id]: self };
+}
+
 function parseStoredPeople(raw: string | null): Record<PersonId, Person> | null {
   if (!raw) return null;
   try {
@@ -111,10 +121,17 @@ function parseStoredPeople(raw: string | null): Record<PersonId, Person> | null 
   }
 }
 
-function inferParentRole(next: Record<PersonId, Person>, parentId: PersonId): ParentType {
+function inferParentRole(
+  next: Record<PersonId, Person>,
+  parentId: PersonId,
+  spouseId?: PersonId,
+): ParentType {
   const parent = next[parentId];
   if (parent?.gender === 'male') return 'father';
   if (parent?.gender === 'female') return 'mother';
+  const spouse = spouseId ? next[spouseId] : undefined;
+  if (spouse?.gender === 'male') return 'mother';
+  if (spouse?.gender === 'female') return 'father';
 
   const hasFatherLink = Object.values(next).some(p => p.fatherId === parentId);
   if (hasFatherLink) return 'father';
@@ -124,7 +141,12 @@ function inferParentRole(next: Record<PersonId, Person>, parentId: PersonId): Pa
   return 'father';
 }
 
-export function PedigreeScreen({ auth }: Props) {
+export function PedigreeScreen({
+  auth,
+  onRequestLogout,
+  onRequestSwitchAccount,
+  onRequestLinkGoogle,
+}: Props) {
   const [peopleById, setPeopleById] = useState<Record<PersonId, Person>>(createInitialPeople);
   const [isHydrated, setIsHydrated] = useState(false);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('idle');
@@ -257,9 +279,8 @@ export function PedigreeScreen({ auth }: Props) {
           // 서버 조회 실패 시 로컬/기본 템플릿 사용
           if (mounted) setSyncStatus('offline');
         }
-      } finally {
-        if (mounted) setIsHydrated(true);
       }
+      if (mounted) setIsHydrated(true);
     };
     hydrate();
     return () => {
@@ -381,6 +402,8 @@ export function PedigreeScreen({ auth }: Props) {
     return pairs;
   }, [peopleById]);
 
+  const kinshipLabelById = useMemo(() => buildKinshipLabels(peopleById, 'self'), [peopleById]);
+
   const MIN_SCALE = 0.25;
   const MAX_SCALE = 2.8;
   const clampScaleOnJs = (v: number) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, v));
@@ -489,6 +512,16 @@ export function PedigreeScreen({ auth }: Props) {
       if (action.kind === 'parent') {
         const child = next[action.childId];
         if (child) {
+          const normalizedParent: Person = {
+            ...next[person.id],
+            gender:
+              next[person.id].gender && next[person.id].gender !== 'unknown'
+                ? next[person.id].gender
+                : action.parentType === 'father'
+                  ? 'male'
+                  : 'female',
+          };
+          next[person.id] = normalizedParent;
           const otherParentId =
             action.parentType === 'father' ? child.motherId : child.fatherId;
           next[action.childId] = {
@@ -517,7 +550,7 @@ export function PedigreeScreen({ auth }: Props) {
         const parent = next[action.parentId];
         if (parent) {
           const spouseId = parent.spouseId;
-          const inferredRole = inferParentRole(next, action.parentId);
+          const inferredRole = inferParentRole(next, action.parentId, spouseId);
           next[person.id] = {
             ...next[person.id],
             ...(inferredRole === 'father'
@@ -527,7 +560,7 @@ export function PedigreeScreen({ auth }: Props) {
               ? inferredRole === 'father'
                 ? { motherId: spouseId }
                 : { fatherId: spouseId }
-              : null),
+              : {}),
           };
         }
       } else if (action.kind === 'spouse') {
@@ -583,6 +616,71 @@ export function PedigreeScreen({ auth }: Props) {
     setEditingId(null);
   };
 
+  const resetPedigree = async () => {
+    Alert.alert('족보 초기화', '현재 계정의 족보를 초기화할까요?', [
+      { text: '취소', style: 'cancel' },
+      {
+        text: '초기화',
+        style: 'destructive',
+        onPress: async () => {
+          // 초기화 시 "나"는 남기고 모든 연결/인물을 제거한다.
+          const initial = createSelfOnlyPeople();
+          setPeopleById(initial);
+          setSelectedId('self');
+          lastSyncedPeopleRef.current = initial;
+          deletedIdsRef.current.clear();
+          queueRef.current = [];
+          setSyncStatus('idle');
+          await AsyncStorage.removeItem(localStorageKey);
+          await AsyncStorage.removeItem(queueStorageKey);
+
+          if (auth?.googleSub && auth.accessToken) {
+            try {
+              await fetch(`${API_BASE_URL}/v1/pedigree/${encodeURIComponent(auth.googleSub)}`, {
+                method: 'DELETE',
+                headers: {
+                  Authorization: `Bearer ${auth.accessToken}`,
+                },
+              });
+            } catch {
+              // 오프라인이면 로컬 초기화 후 다음 동기화 때 서버 반영
+            }
+          }
+        },
+      },
+    ]);
+  };
+
+  const askSwitchAccount = async () => {
+    if (!onRequestSwitchAccount) return;
+    setSettingsVisible(false);
+    try {
+      await onRequestSwitchAccount();
+    } catch {
+      Alert.alert('계정 변경 실패', '계정 변경 중 오류가 발생했습니다.');
+    }
+  };
+
+  const askLogout = async () => {
+    if (!onRequestLogout) return;
+    setSettingsVisible(false);
+    try {
+      await onRequestLogout();
+    } catch {
+      Alert.alert('로그아웃 실패', '로그아웃 중 오류가 발생했습니다.');
+    }
+  };
+
+  const askLinkGoogle = async () => {
+    if (!onRequestLinkGoogle) return;
+    setSettingsVisible(false);
+    try {
+      await onRequestLinkGoogle();
+    } catch {
+      Alert.alert('연동 실패', '구글 계정 연동 중 오류가 발생했습니다.');
+    }
+  };
+
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
       <View style={styles.header}>
@@ -630,7 +728,7 @@ export function PedigreeScreen({ auth }: Props) {
               return (
                 <View key={n.id} style={[styles.node, { left: n.x, top: n.y }]}>
                   <PersonNodeCard
-                    label={p.id === 'self' ? '나' : ' '}
+                    label={kinshipLabelById[p.id] ?? '친족'}
                     person={p}
                     onPress={() => openActionsFor(n.id)}
                     style={{ width: n.width, maxWidth: n.width, minWidth: n.width }}
@@ -816,10 +914,37 @@ export function PedigreeScreen({ auth }: Props) {
       >
         <Pressable style={styles.sheetBackdrop} onPress={() => setSettingsVisible(false)}>
           <Pressable style={styles.settingsSheet} onPress={() => {}}>
-            <Text style={styles.settingsTitle}>기타 설정 (임시)</Text>
-            <Text style={styles.settingsDesc}>- 알림 설정 (준비 중)</Text>
-            <Text style={styles.settingsDesc}>- 백업/복원 (준비 중)</Text>
-            <Text style={styles.settingsDesc}>- 계정 관리 (준비 중)</Text>
+            <Text style={styles.settingsTitle}>설정</Text>
+            {auth?.googleSub ? (
+              <>
+                <Text style={styles.settingsDesc}>
+                  계정: {auth.name?.trim() ? auth.name : auth.email ?? auth.googleSub}
+                </Text>
+                <Text style={styles.settingsSubDesc}>{auth.email ?? auth.googleSub}</Text>
+                <Pressable style={styles.settingsActionBtn} onPress={askSwitchAccount}>
+                  <Text style={styles.settingsActionText}>구글 계정 변경</Text>
+                </Pressable>
+                <Pressable style={styles.settingsActionBtn} onPress={askLogout}>
+                  <Text style={styles.settingsActionText}>로그아웃</Text>
+                </Pressable>
+              </>
+            ) : (
+              <>
+                <Text style={styles.settingsDesc}>게스트 모드</Text>
+                <Text style={styles.settingsSubDesc}>
+                  구글 연동을 시작하면 이 시점부터 서버 동기화를 시작합니다.
+                </Text>
+                <Pressable style={styles.settingsActionBtn} onPress={askLinkGoogle}>
+                  <Text style={styles.settingsActionText}>구글 연동 시작</Text>
+                </Pressable>
+              </>
+            )}
+            <Pressable
+              style={[styles.settingsActionBtn, styles.settingsDangerBtn]}
+              onPress={resetPedigree}
+            >
+              <Text style={[styles.settingsActionText, styles.settingsDangerText]}>족보 초기화</Text>
+            </Pressable>
             <Pressable style={styles.settingsCloseBtn} onPress={() => setSettingsVisible(false)}>
               <Text style={styles.settingsCloseBtnText}>닫기</Text>
             </Pressable>
@@ -1047,6 +1172,33 @@ const styles = StyleSheet.create({
     color: '#374151',
     fontSize: 13,
     fontWeight: '600',
+  },
+  settingsSubDesc: {
+    color: '#6b7280',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 8,
+  },
+  settingsActionBtn: {
+    marginTop: 6,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+  },
+  settingsActionText: {
+    color: '#111827',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  settingsDangerBtn: {
+    borderColor: '#fecaca',
+    backgroundColor: '#fff1f2',
+  },
+  settingsDangerText: {
+    color: '#b91c1c',
   },
   settingsCloseBtn: {
     marginTop: 10,

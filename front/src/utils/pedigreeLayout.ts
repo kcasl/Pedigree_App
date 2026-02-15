@@ -58,6 +58,22 @@ function reorderRowBySpouseAdjacency(ids: PersonId[], people: Record<PersonId, P
     if (!spouseId) continue;
     if (used.has(spouseId)) continue;
     if (!baseSorted.includes(spouseId)) continue;
+    // 배우자 쌍은 가능한 한 남성(좌) - 여성(우) 순으로 고정해
+    // 부모/조부모 라인의 방향성을 일관되게 유지한다.
+    const me = people[id];
+    const spouse = people[spouseId];
+    const shouldSwap =
+      me?.gender === 'female' &&
+      spouse?.gender === 'male' &&
+      out.length > 0 &&
+      out[out.length - 1] === id;
+    if (shouldSwap) {
+      out.pop();
+      out.push(spouseId);
+      out.push(id);
+      used.add(spouseId);
+      continue;
+    }
     used.add(spouseId);
     out.push(spouseId);
   }
@@ -283,6 +299,28 @@ export function buildPedigreeLayout(
     const gen = Number(genStr);
     const ids = rows.get(key) ?? [];
     const y = getRowY(gen);
+
+    if (side === 'center') {
+      // generation 0 외의 center row(자녀/손자 등)도 반드시 배치한다.
+      const totalWidth = ids.length * cardWidth + Math.max(0, ids.length - 1) * colGap;
+      const startX = centerX - totalWidth / 2;
+      for (let i = 0; i < ids.length; i++) {
+        const id = ids[i];
+        const x = startX + i * (cardWidth + colGap);
+        const node: PositionedNode = {
+          id,
+          x,
+          y,
+          width: cardWidth,
+          height: cardHeight,
+          generation: gen,
+          side,
+        };
+        nodeById[id] = node;
+        nodes.push(node);
+      }
+      continue;
+    }
 
     if (side === 'left') {
       // Align closest to center first, then extend left.

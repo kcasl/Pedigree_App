@@ -19,7 +19,6 @@ import {
 import {
   GoogleSignin,
   statusCodes,
-  type User,
 } from '@react-native-google-signin/google-signin';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -27,6 +26,7 @@ import { API_BASE_URL } from './src/config/api';
 import { PedigreeScreen } from './src/screens/PedigreeScreen';
 
 const AUTH_STORAGE_KEY = 'auth.google.user.v1';
+const AUTH_MODE_STORAGE_KEY = 'auth.mode.v1';
 const GOOGLE_WEB_CLIENT_ID =
   '1086441770395-u066dpf25ppfjcktmtai6092p5e2pa6d.apps.googleusercontent.com';
 
@@ -37,6 +37,29 @@ type StoredAuthUser = {
   photo?: string | null;
   accessToken?: string;
 };
+
+type GoogleProfile = {
+  id: string;
+  email: string;
+  name?: string | null;
+  photo?: string | null;
+};
+
+function hasString(v: unknown): v is string {
+  return typeof v === 'string' && v.trim().length > 0;
+}
+
+function toGoogleProfile(raw: unknown): GoogleProfile | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  if (!hasString(obj.id) || !hasString(obj.email)) return null;
+  return {
+    id: obj.id,
+    email: obj.email,
+    name: typeof obj.name === 'string' ? obj.name : null,
+    photo: typeof obj.photo === 'string' ? obj.photo : null,
+  };
+}
 
 export default function App() {
   const [isBooting, setIsBooting] = useState(true);
@@ -80,7 +103,7 @@ export default function App() {
   };
 
   const buildFallbackUser = (
-    signedInUser: User,
+    signedInUser: GoogleProfile,
     accessToken?: string,
   ): StoredAuthUser => ({
     googleSub: signedInUser.id,
@@ -90,12 +113,37 @@ export default function App() {
     accessToken,
   });
 
-  const resolveSignedInUser = (result: unknown): User | null => {
-    const fromData = (result as { data?: { user?: User } })?.data?.user;
-    if (fromData?.email) return fromData;
-    const fromLegacy = (result as { user?: User })?.user;
-    if (fromLegacy?.email) return fromLegacy;
-    return null;
+  const resolveSignedInUser = (result: unknown): GoogleProfile | null => {
+    const obj = (result ?? {}) as Record<string, unknown>;
+    return (
+      toGoogleProfile((obj.data as { user?: unknown } | undefined)?.user) ||
+      toGoogleProfile(obj.user) ||
+      toGoogleProfile(obj.data) ||
+      toGoogleProfile(result)
+    );
+  };
+
+  const migrateGuestPedigreeToGoogle = async (googleSub: string) => {
+    const guestPeopleKey = 'pedigree.people.guest.v1';
+    const guestQueueKey = 'pedigree.queue.guest.v1';
+    const userPeopleKey = `pedigree.people.${googleSub}.v1`;
+    const userQueueKey = `pedigree.queue.${googleSub}.v1`;
+    try {
+      const [guestPeople, guestQueue, userPeople, userQueue] = await Promise.all([
+        AsyncStorage.getItem(guestPeopleKey),
+        AsyncStorage.getItem(guestQueueKey),
+        AsyncStorage.getItem(userPeopleKey),
+        AsyncStorage.getItem(userQueueKey),
+      ]);
+      if (!userPeople && guestPeople) {
+        await AsyncStorage.setItem(userPeopleKey, guestPeople);
+      }
+      if (!userQueue && guestQueue) {
+        await AsyncStorage.setItem(userQueueKey, guestQueue);
+      }
+    } catch {
+      // 마이그레이션 실패 시에도 로그인 진행
+    }
   };
 
   useEffect(() => {
@@ -107,10 +155,15 @@ export default function App() {
     const restoreLogin = async () => {
       try {
         const raw = await AsyncStorage.getItem(AUTH_STORAGE_KEY);
+        const mode = await AsyncStorage.getItem(AUTH_MODE_STORAGE_KEY);
+        if (mode === 'guest') {
+          setIsGuestMode(true);
+        }
         if (raw) {
           const parsed = JSON.parse(raw) as StoredAuthUser;
           if (parsed?.email && parsed?.googleSub) {
             setUser(parsed);
+            setIsGuestMode(false);
           }
         }
 
@@ -143,6 +196,8 @@ export default function App() {
               // 네트워크 불안정 시 서버 upsert를 건너뛰고 로컬 로그인 유지
             }
             setUser(nextUser);
+            setIsGuestMode(false);
+            await AsyncStorage.setItem(AUTH_MODE_STORAGE_KEY, 'google');
             await AsyncStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(nextUser));
           }
         } catch {
@@ -190,24 +245,70 @@ export default function App() {
       } catch {
         Alert.alert('네트워크 안내', '서버 연결 없이 로그인했습니다. 연결되면 자동 동기화됩니다.');
       }
+      await migrateGuestPedigreeToGoogle(nextUser.googleSub);
       setUser(nextUser);
+      setIsGuestMode(false);
+      await AsyncStorage.setItem(AUTH_MODE_STORAGE_KEY, 'google');
       await AsyncStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(nextUser));
     } catch (error: unknown) {
       const code = (error as { code?: string }).code;
+      const message = (error as { message?: string })?.message ?? '';
       if (code === statusCodes.SIGN_IN_CANCELLED) return;
       if (code === statusCodes.IN_PROGRESS) return;
       if (code === statusCodes.PLAY_SERVICES_NOT_AVAILABLE) {
         Alert.alert('로그인 불가', 'Google Play 서비스가 필요합니다.');
         return;
       }
-      Alert.alert('로그인 오류', '구글 로그인 중 오류가 발생했습니다.');
+      const isDeveloperError =
+        code === 'DEVELOPER_ERROR' ||
+        code === '10' ||
+        message.includes('DEVELOPER_ERROR') ||
+        message.includes('10:');
+      if (isDeveloperError) {
+        Alert.alert(
+          '로그인 설정 오류',
+          'DEVELOPER_ERROR 입니다. Android 패키지명/SHA-1/OAuth 클라이언트 설정을 확인하세요.',
+        );
+        return;
+      }
+      Alert.alert('로그인 오류', `구글 로그인 중 오류가 발생했습니다. (${code ?? 'unknown'})`);
     } finally {
       setIsSigningIn(false);
     }
   };
 
-  const onContinueWithoutLogin = () => {
+  const onContinueWithoutLogin = async () => {
     setIsGuestMode(true);
+    await AsyncStorage.setItem(AUTH_MODE_STORAGE_KEY, 'guest');
+  };
+
+  const onRequestLogout = async () => {
+    try {
+      await GoogleSignin.signOut();
+    } catch {
+      // 이미 로그아웃 상태일 수 있으므로 무시
+    }
+    setUser(null);
+    setIsGuestMode(false);
+    await AsyncStorage.removeItem(AUTH_STORAGE_KEY);
+    await AsyncStorage.removeItem(AUTH_MODE_STORAGE_KEY);
+  };
+
+  const onRequestSwitchAccount = async () => {
+    try {
+      await GoogleSignin.signOut();
+    } catch {
+      // signOut 실패는 무시하고 로그인 시도
+    }
+    setUser(null);
+    setIsGuestMode(false);
+    await AsyncStorage.removeItem(AUTH_STORAGE_KEY);
+    await AsyncStorage.removeItem(AUTH_MODE_STORAGE_KEY);
+    await onGoogleLogin();
+  };
+
+  const onRequestLinkGoogle = async () => {
+    await onGoogleLogin();
   };
 
   const isAuthenticated = !!user || isGuestMode;
@@ -229,9 +330,13 @@ export default function App() {
                     googleSub: user.googleSub,
                     accessToken: user.accessToken,
                     email: user.email,
+                    name: user.name ?? undefined,
                   }
                 : undefined
             }
+            onRequestLogout={onRequestLogout}
+            onRequestSwitchAccount={onRequestSwitchAccount}
+            onRequestLinkGoogle={onRequestLinkGoogle}
           />
         ) : (
           <View style={styles.authWrap}>
