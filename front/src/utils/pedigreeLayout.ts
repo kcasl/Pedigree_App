@@ -39,12 +39,97 @@ function getChildren(people: Record<PersonId, Person>, parentId: PersonId): Pers
   return out;
 }
 
+function buildBloodRelativeSet(
+  people: Record<PersonId, Person>,
+  selfId: PersonId,
+): Set<PersonId> {
+  const blood = new Set<PersonId>();
+  const queue: PersonId[] = [selfId];
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    if (blood.has(id)) continue;
+    const me = people[id];
+    if (!me) continue;
+    blood.add(id);
+    if (me.fatherId && people[me.fatherId] && !blood.has(me.fatherId)) queue.push(me.fatherId);
+    if (me.motherId && people[me.motherId] && !blood.has(me.motherId)) queue.push(me.motherId);
+    for (const p of Object.values(people)) {
+      if (p.fatherId === id || p.motherId === id) {
+        if (!blood.has(p.id)) queue.push(p.id);
+      }
+    }
+  }
+  return blood;
+}
+
 function inferSpouseSide(baseSide: Side): Side {
   if (baseSide === 'center') return 'center';
   return baseSide;
 }
 
-function reorderRowBySpouseAdjacency(ids: PersonId[], people: Record<PersonId, Person>): PersonId[] {
+function inferCenterPersonAncestorSide(person?: Person): Side {
+  if (!person) return 'left';
+  if (person.gender === 'male') return 'left';
+  if (person.gender === 'female') return 'right';
+  return 'left';
+}
+
+function pairOrderTs(p?: Person): number {
+  const ts = p?.createdAt ? Date.parse(p.createdAt) : NaN;
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function isLeftMemberInPair(
+  id: PersonId,
+  spouseId: PersonId,
+  people: Record<PersonId, Person>,
+): boolean {
+  const a = people[id];
+  const b = people[spouseId];
+
+  // 1) 가장 강한 규칙: 남성-여성 쌍이면 남성을 좌측 멤버로 본다.
+  if (a?.gender === 'male' && b?.gender === 'female') return true;
+  if (a?.gender === 'female' && b?.gender === 'male') return false;
+
+  // 2) lineage side hint가 있으면 그 값을 우선 반영한다.
+  if (a?.lineageSideHint && b?.lineageSideHint && a.lineageSideHint !== b.lineageSideHint) {
+    return a.lineageSideHint === 'left';
+  }
+  if (a?.lineageSideHint && !b?.lineageSideHint) {
+    return a.lineageSideHint === 'left';
+  }
+  if (!a?.lineageSideHint && b?.lineageSideHint) {
+    return b.lineageSideHint !== 'left';
+  }
+
+  // 3) 그 외에는 생성 순서 fallback
+  const ta = pairOrderTs(a);
+  const tb = pairOrderTs(b);
+  if (ta !== tb) return ta < tb;
+  return id < spouseId;
+}
+
+function inferLocalDirection(person?: Person): 'left' | 'right' {
+  if (person?.gender === 'male') return 'left';
+  if (person?.gender === 'female') return 'right';
+  return 'left';
+}
+
+function parentLocalDir(
+  relation: 'father' | 'mother',
+  fallback: 'left' | 'right',
+): 'left' | 'right' {
+  // 부모 쌍의 상대 위치는 항상 부(좌) / 모(우)로 고정
+  if (relation === 'father') return 'left';
+  if (relation === 'mother') return 'right';
+  return fallback;
+}
+
+function reorderRowBySpouseAdjacency(
+  ids: PersonId[],
+  people: Record<PersonId, Person>,
+  side: Side,
+): PersonId[] {
   const baseSorted = [...ids];
   const used = new Set<PersonId>();
   const out: PersonId[] = [];
@@ -58,24 +143,20 @@ function reorderRowBySpouseAdjacency(ids: PersonId[], people: Record<PersonId, P
     if (!spouseId) continue;
     if (used.has(spouseId)) continue;
     if (!baseSorted.includes(spouseId)) continue;
-    // 배우자 쌍은 가능한 한 남성(좌) - 여성(우) 순으로 고정해
-    // 부모/조부모 라인의 방향성을 일관되게 유지한다.
-    const me = people[id];
-    const spouse = people[spouseId];
-    const shouldSwap =
-      me?.gender === 'female' &&
-      spouse?.gender === 'male' &&
-      out.length > 0 &&
-      out[out.length - 1] === id;
-    if (shouldSwap) {
+    // 부부는 화면상 남성-좌 / 여성-우(또는 leftMember-우측/좌측 규칙)를 유지한다.
+    // left row는 i가 커질수록 더 왼쪽으로 가므로 순서를 반대로 넣어야 시각적 좌우가 맞다.
+    const isLeftFirst = isLeftMemberInPair(id, spouseId, people);
+    if (out[out.length - 1] === id) {
       out.pop();
-      out.push(spouseId);
-      out.push(id);
-      used.add(spouseId);
-      continue;
     }
-    used.add(spouseId);
-    out.push(spouseId);
+    const leftMember = isLeftFirst ? id : spouseId;
+    const rightMember = isLeftFirst ? spouseId : id;
+    const first = side === 'left' ? rightMember : leftMember;
+    const second = side === 'left' ? leftMember : rightMember;
+    used.add(first);
+    used.add(second);
+    out.push(first);
+    out.push(second);
   }
 
   return out;
@@ -132,6 +213,7 @@ export function buildPedigreeLayout(
 
   const included = new Set<PersonId>();
   included.add(self.id);
+  const bloodSet = buildBloodRelativeSet(people, self.id);
 
   // Ancestors up to N (and their siblings + cousin generation)
   const queue: Array<{ id: PersonId; gen: number; side: Side }> = [
@@ -140,16 +222,32 @@ export function buildPedigreeLayout(
 
   const generationById = new Map<PersonId, number>();
   const sideById = new Map<PersonId, Side>();
+  const localDirById = new Map<PersonId, 'left' | 'right'>();
   generationById.set(self.id, 0);
   sideById.set(self.id, 'center');
+  localDirById.set(self.id, 'left');
 
-  const push = (id: PersonId | undefined, gen: number, side: Side) => {
+  const push = (
+    id: PersonId | undefined,
+    gen: number,
+    side: Side,
+    localDir?: 'left' | 'right',
+  ) => {
     if (!id) return;
     if (!people[id]) return;
+    const hinted = people[id].lineageSideHint;
+    const effectiveSide: Side = hinted ?? side;
     if (!generationById.has(id)) {
       generationById.set(id, gen);
-      sideById.set(id, side);
-      queue.push({ id, gen, side });
+      sideById.set(id, effectiveSide);
+      queue.push({ id, gen, side: effectiveSide });
+    } else if ((hinted === 'left' || hinted === 'right') && sideById.get(id) !== hinted) {
+      // hint가 생긴 경우에는 분기(side)를 즉시 교정해서 부모 라인이 꼬이지 않게 한다.
+      sideById.set(id, hinted);
+      queue.push({ id, gen: generationById.get(id) ?? gen, side: hinted });
+    }
+    if (localDir && !localDirById.has(id)) {
+      localDirById.set(id, localDir);
     }
     included.add(id);
   };
@@ -165,15 +263,65 @@ export function buildPedigreeLayout(
 
     // Parents (ancestors)
     if (gen > -opts.maxAncestorDepth) {
+      const spouseId = person.spouseId;
+      let preferredParentSide: Side | null = null;
+      let preferredLocalDir: 'left' | 'right' = localDirById.get(person.id) ?? inferLocalDirection(person);
+      if (side === 'left' || side === 'right') {
+        // 친가/외가 가지에 들어온 조상은 해당 가지(side)를 유지한다.
+        preferredParentSide = side;
+        // 같은 가지 내부에서만 좌/우 멤버(조부계/조모계) 분리를 위해 local dir 갱신.
+        if (spouseId && people[spouseId]) {
+          const isLeftMember = isLeftMemberInPair(person.id, spouseId, people);
+          preferredLocalDir = isLeftMember ? 'left' : 'right';
+        }
+      } else if (spouseId && people[spouseId]) {
+        // center 라인에서만 부부 내 좌/우로 가지를 새로 분기한다.
+        const isLeftMember = isLeftMemberInPair(person.id, spouseId, people);
+        preferredLocalDir = isLeftMember ? 'left' : 'right';
+        preferredParentSide = preferredLocalDir === 'left' ? 'left' : 'right';
+      } else if (person.lineageSideHint) {
+        preferredParentSide = person.lineageSideHint;
+      }
       if (cur.id === self.id) {
-        push(person.fatherId, gen - 1, 'left');
-        push(person.motherId, gen - 1, 'right');
+        push(person.fatherId, gen - 1, 'left', 'left');
+        push(person.motherId, gen - 1, 'right', 'right');
+      } else if (preferredParentSide) {
+        // 부부 쌍인 경우 각자의 부모는 자기 노드 방향으로만 확장한다.
+        push(
+          person.fatherId,
+          gen - 1,
+          preferredParentSide,
+          parentLocalDir('father', preferredLocalDir),
+        );
+        push(
+          person.motherId,
+          gen - 1,
+          preferredParentSide,
+          parentLocalDir('mother', preferredLocalDir),
+        );
       } else if (side === 'left') {
-        push(person.fatherId, gen - 1, 'left');
-        push(person.motherId, gen - 1, 'left');
+        push(person.fatherId, gen - 1, 'left', parentLocalDir('father', preferredLocalDir));
+        push(person.motherId, gen - 1, 'left', parentLocalDir('mother', preferredLocalDir));
       } else if (side === 'right') {
-        push(person.fatherId, gen - 1, 'right');
-        push(person.motherId, gen - 1, 'right');
+        push(person.fatherId, gen - 1, 'right', parentLocalDir('father', preferredLocalDir));
+        push(person.motherId, gen - 1, 'right', parentLocalDir('mother', preferredLocalDir));
+      } else {
+        // center(배우자/자녀 라인) 인물은 자기 쪽 방향을 고정해서
+        // 부모 추가 시 좌우가 섞이지 않도록 유지한다.
+        const inherited = inferCenterPersonAncestorSide(person);
+        const inheritedLocal: 'left' | 'right' = inherited === 'left' ? 'left' : 'right';
+        push(
+          person.fatherId,
+          gen - 1,
+          inherited,
+          parentLocalDir('father', inheritedLocal),
+        );
+        push(
+          person.motherId,
+          gen - 1,
+          inherited,
+          parentLocalDir('mother', inheritedLocal),
+        );
       }
     }
 
@@ -182,13 +330,14 @@ export function buildPedigreeLayout(
       for (const child of getChildren(people, person.id)) {
         const childSide =
           cur.id === self.id ? 'center' : side; // descendants inherit side (except self -> center)
-        push(child.id, gen + 1, childSide);
+        push(child.id, gen + 1, childSide, localDirById.get(person.id));
       }
     }
 
     // Spouse: same generation / same side row
     if (person.spouseId) {
-      push(person.spouseId, gen, inferSpouseSide(side));
+      const spouseLocal: 'left' | 'right' = localDirById.get(person.id) === 'left' ? 'right' : 'left';
+      push(person.spouseId, gen, inferSpouseSide(side), spouseLocal);
     }
 
     // Siblings: people with same parents -> same generation row
@@ -200,7 +349,7 @@ export function buildPedigreeLayout(
         const sameFather = fatherId && other.fatherId === fatherId;
         const sameMother = motherId && other.motherId === motherId;
         if (sameFather || sameMother) {
-          push(other.id, gen, side);
+          push(other.id, gen, side, localDirById.get(person.id));
         }
       }
     }
@@ -227,7 +376,40 @@ export function buildPedigreeLayout(
       const tb = pb?.createdAt ? Date.parse(pb.createdAt) : 0;
       return ta - tb;
     });
-    rows.set(key, reorderRowBySpouseAdjacency(ids, people));
+    const [, side] = key.split(':') as [string, Side];
+    let ordered = reorderRowBySpouseAdjacency(ids, people, side);
+    if (side === 'left' || side === 'right') {
+      // 단순 확정 규칙:
+      // - side row에서 index 0이 항상 "안쪽(중앙 가까움)"
+      // - 혈연(직계/방계)은 안쪽, 인척은 바깥쪽
+      // - 부부 unit은 인접 유지, unit 내부는 혈연 먼저/인척 나중
+      const inRow = new Set(ids);
+      const used = new Set<PersonId>();
+      const units: Array<{ ids: PersonId[]; rank: number }> = [];
+
+      for (const id of ordered) {
+        if (used.has(id)) continue;
+        const spouseId = people[id]?.spouseId;
+        if (spouseId && inRow.has(spouseId) && !used.has(spouseId)) {
+          const aBlood = bloodSet.has(id);
+          const bBlood = bloodSet.has(spouseId);
+          const pair: PersonId[] =
+            aBlood === bBlood ? [id, spouseId] : aBlood ? [id, spouseId] : [spouseId, id];
+          used.add(pair[0]);
+          used.add(pair[1]);
+          const rank = aBlood || bBlood ? (aBlood && bBlood ? 0 : 1) : 2;
+          units.push({ ids: pair, rank });
+          continue;
+        }
+
+        used.add(id);
+        units.push({ ids: [id], rank: bloodSet.has(id) ? 0 : 2 });
+      }
+
+      units.sort((u1, u2) => u1.rank - u2.rank);
+      ordered = units.flatMap(u => u.ids);
+    }
+    rows.set(key, ordered);
   }
 
   // ---- 자동 튜닝(한 줄에 노드가 많아질수록 카드/간격을 살짝 줄여 한 화면에 더 잘 들어오게) ----
@@ -323,14 +505,16 @@ export function buildPedigreeLayout(
     }
 
     if (side === 'left') {
-      // Align closest to center first, then extend left.
-      for (let i = 0; i < ids.length; i++) {
-        const id = ids[i];
-        const x =
-          centerX -
-          colGap -
-          cardWidth -
-          i * (cardWidth + colGap);
+      // left row:
+      // - localDir=right(안쪽)은 center 인접 슬롯부터 채움
+      // - localDir=left(바깥)은 한 칸 바깥 슬롯부터 채워
+      //   단일 노드(예: 조부 기준 증조부만 있는 경우)도 더 왼쪽으로 치우치게 함
+      let inwardSlot = 0;
+      let outwardSlot = 1;
+      for (const id of ids) {
+        const localDir = localDirById.get(id) ?? 'right';
+        const slot = localDir === 'left' ? outwardSlot++ : inwardSlot++;
+        const x = centerX - colGap - cardWidth - slot * (cardWidth + colGap);
         const node: PositionedNode = {
           id,
           x,
@@ -344,12 +528,15 @@ export function buildPedigreeLayout(
         nodes.push(node);
       }
     } else if (side === 'right') {
-      for (let i = 0; i < ids.length; i++) {
-        const id = ids[i];
-        const x =
-          centerX +
-          colGap +
-          i * (cardWidth + colGap);
+      // right row:
+      // - localDir=left(안쪽)은 center 인접 슬롯부터
+      // - localDir=right(바깥)은 한 칸 바깥 슬롯부터
+      let inwardSlot = 0;
+      let outwardSlot = 1;
+      for (const id of ids) {
+        const localDir = localDirById.get(id) ?? 'left';
+        const slot = localDir === 'right' ? outwardSlot++ : inwardSlot++;
+        const x = centerX + colGap + slot * (cardWidth + colGap);
         const node: PositionedNode = {
           id,
           x,

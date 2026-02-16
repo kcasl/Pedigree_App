@@ -35,9 +35,9 @@ export function EdgeLines({
 }: Props) {
   const lines: React.ReactNode[] = [];
   const gap = 24;
-  const attachOffset = 8;
-  const laneStep = 10;
-  const lineDrop = 12;
+  const attachOffset = 0;
+  const lineDrop = 10;
+  const spouseLineDrop = 8;
 
   const parentsByChild: Record<string, string[]> = {};
   edges.forEach(edge => {
@@ -106,26 +106,12 @@ export function EdgeLines({
     }
   }
 
-  // 그룹 내 child index (lane)는 같은 부모그룹 안에서만 공유됨 -> 다른 가계선과 섞이지 않음.
-  const laneByChildId: Record<string, number> = {};
-  Object.values(childIdsByGroupKey).forEach(ids => {
-    const sorted = ids
-      .map(id => nodeById[id])
-      .filter((v): v is PositionedNode => !!v)
-      .sort((a, b) => a.x - b.x)
-      .map(v => v.id);
-    sorted.forEach((id, idx) => {
-      laneByChildId[id] = idx;
-    });
-  });
-
   // child-centric strict rendering
   Object.entries(parentGroupByChild).forEach(([childId, group]) => {
     const child = nodeById[childId];
     if (!child) return;
     const childX = child.x + child.width / 2;
     const childTop = child.y - attachOffset;
-    const lane = laneByChildId[childId] ?? 0;
 
     if (group.kind === 'pair') {
       const a = nodeById[group.aId];
@@ -139,6 +125,7 @@ export function EdgeLines({
       const leftBottom = left.y + left.height + attachOffset;
       const rightBottom = right.y + right.height + attachOffset;
       const spouseY = Math.max(leftBottom, rightBottom);
+      const spouseLineY = spouseY + spouseLineDrop;
       const midX = (leftX + rightX) / 2;
 
       if (leftBottom < spouseY) {
@@ -178,7 +165,7 @@ export function EdgeLines({
           key={`pair_base_${childId}`}
           style={lineStyle(
             leftX,
-            spouseY - strokeWidth / 2,
+            spouseLineY - strokeWidth / 2,
             Math.max(strokeWidth, rightX - leftX),
             strokeWidth,
             color,
@@ -188,8 +175,8 @@ export function EdgeLines({
       );
 
       // parent-center -> child (L-shape), lane offset to avoid sibling overlap
-      let midY = (spouseY + childTop) / 2 + lineDrop + lane * laneStep;
-      const minMid = spouseY + gap + lineDrop;
+      let midY = (spouseLineY + childTop) / 2 + lineDrop;
+      const minMid = spouseLineY + gap + lineDrop;
       const maxMid = childTop - gap;
       if (minMid <= maxMid) {
         midY = Math.min(maxMid, Math.max(minMid, midY));
@@ -200,9 +187,9 @@ export function EdgeLines({
           key={`pair_trunk_${childId}`}
           style={lineStyle(
             midX - strokeWidth / 2,
-            spouseY,
+            spouseLineY,
             strokeWidth,
-            Math.max(strokeWidth, midY - spouseY),
+            Math.max(strokeWidth, midY - spouseLineY),
             color,
             strokeWidth,
           )}
@@ -241,8 +228,7 @@ export function EdgeLines({
     if (!parent) return;
     const parentX = parent.x + parent.width / 2;
     const parentBottom = parent.y + parent.height + attachOffset;
-
-    let midY = (parentBottom + childTop) / 2 + lineDrop + lane * laneStep;
+    let midY = (parentBottom + childTop) / 2 + lineDrop;
     const minMid = parentBottom + gap + lineDrop;
     const maxMid = childTop - gap;
     if (minMid <= maxMid) {
@@ -299,7 +285,7 @@ export function EdgeLines({
     const right = a.x <= b.x ? b : a;
     const leftX = left.x + left.width / 2;
     const rightX = right.x + right.width / 2;
-    const y = Math.max(left.y + left.height, right.y + right.height) + 10;
+    const y = Math.max(left.y + left.height, right.y + right.height) + 10 + spouseLineDrop;
     lines.push(
       <View
         key={`spouse_${idx}_${pair.aId}_${pair.bId}`}

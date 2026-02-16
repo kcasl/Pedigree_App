@@ -97,15 +97,15 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   avatar: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
+    width: 78,
+    height: 78,
+    borderRadius: 39,
     backgroundColor: '#f3f4f6',
   },
   avatarFallback: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
+    width: 78,
+    height: 78,
+    borderRadius: 39,
     backgroundColor: '#f3f4f6',
     borderWidth: 1,
     borderColor: '#e5e7eb',
@@ -114,7 +114,7 @@ const styles = StyleSheet.create({
   },
   avatarFallbackText: {
     color: '#111827',
-    fontSize: 22,
+    fontSize: 24,
     fontWeight: '700',
   },
   name: {

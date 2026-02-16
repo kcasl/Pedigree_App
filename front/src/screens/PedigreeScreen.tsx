@@ -503,6 +503,21 @@ export function PedigreeScreen({
   const onSubmitNewPerson = (person: Person) => {
     const action = pendingAdd;
     if (!action) return;
+    const inferChildSideHint = (childId: PersonId): 'left' | 'right' => {
+      const childNode = layout.nodeById[childId];
+      if (!childNode) return 'left';
+      if (childNode.side === 'left') return 'left';
+      if (childNode.side === 'right') return 'right';
+      const child = peopleById[childId];
+      const spouseId = child?.spouseId;
+      if (spouseId) {
+        const spouseNode = layout.nodeById[spouseId];
+        if (spouseNode) {
+          return childNode.x <= spouseNode.x ? 'left' : 'right';
+        }
+      }
+      return childId === 'self' ? 'left' : 'right';
+    };
     setPeopleById(prev => {
       const next: Record<PersonId, Person> = {
         ...prev,
@@ -512,6 +527,12 @@ export function PedigreeScreen({
       if (action.kind === 'parent') {
         const child = next[action.childId];
         if (child) {
+          const sideHint =
+            action.childId === 'self'
+              ? action.parentType === 'father'
+                ? 'left'
+                : 'right'
+              : inferChildSideHint(action.childId);
           const normalizedParent: Person = {
             ...next[person.id],
             gender:
@@ -520,6 +541,7 @@ export function PedigreeScreen({
                 : action.parentType === 'father'
                   ? 'male'
                   : 'female',
+            lineageSideHint: sideHint,
           };
           next[person.id] = normalizedParent;
           const otherParentId =
@@ -713,7 +735,7 @@ export function PedigreeScreen({
               {
                 width: layout.canvasWidth,
                 height: layout.canvasHeight,
-                backgroundColor: '#ffffff',
+                backgroundColor: '#f2e3c7',
               },
               canvasStyle,
             ]}
@@ -1007,7 +1029,7 @@ const styles = StyleSheet.create({
   },
   stage: {
     flex: 1,
-    backgroundColor: '#ffffff',
+    backgroundColor: '#f2e3c7',
     overflow: 'hidden',
   },
   node: {

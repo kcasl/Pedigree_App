@@ -61,6 +61,20 @@ function toGoogleProfile(raw: unknown): GoogleProfile | null {
   };
 }
 
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('timeout')), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export default function App() {
   const [isBooting, setIsBooting] = useState(true);
   const [isSigningIn, setIsSigningIn] = useState(false);
@@ -152,6 +166,53 @@ export default function App() {
       offlineAccess: false,
     });
 
+    let mounted = true;
+
+    const refreshSilentLogin = async () => {
+      try {
+        await withTimeout(
+          GoogleSignin.hasPlayServices({
+            showPlayServicesUpdateDialog: false,
+          }),
+          4000,
+        );
+        const silent = await withTimeout(GoogleSignin.signInSilently(), 7000);
+        const silentUser = resolveSignedInUser(silent);
+        if (!silentUser?.email) return;
+
+        const tokens = await withTimeout(GoogleSignin.getTokens(), 5000);
+        let nextUser = buildFallbackUser(silentUser, tokens.accessToken);
+        try {
+          const serverUser = await withTimeout(
+            upsertUserOnServer(tokens.accessToken, {
+              idToken: tokens.idToken ?? undefined,
+              googleSub: silentUser.id,
+              email: silentUser.email,
+              name: silentUser.name,
+              photo: silentUser.photo,
+            }),
+            7000,
+          );
+          nextUser = {
+            googleSub: serverUser.google_sub,
+            email: serverUser.email,
+            name: serverUser.name,
+            photo: serverUser.photo_url,
+            accessToken: tokens.accessToken,
+          };
+        } catch {
+          // 서버 불안정 시 로컬 계정만 유지
+        }
+        if (!mounted) return;
+        setUser(nextUser);
+        setIsGuestMode(false);
+        await AsyncStorage.setItem(AUTH_MODE_STORAGE_KEY, 'google');
+        await AsyncStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(nextUser));
+      } catch {
+        // silent refresh 실패/타임아웃은 무시
+      }
+    };
+
     const restoreLogin = async () => {
       try {
         const raw = await AsyncStorage.getItem(AUTH_STORAGE_KEY);
@@ -166,51 +227,18 @@ export default function App() {
             setIsGuestMode(false);
           }
         }
-
-        // 앱 재실행 시 조용히 토큰 갱신 시도 (실패해도 기존 저장 유저로 사용)
-        try {
-          await GoogleSignin.hasPlayServices({
-            showPlayServicesUpdateDialog: false,
-          });
-          const silent = await GoogleSignin.signInSilently();
-          const silentUser = resolveSignedInUser(silent);
-          if (silentUser?.email) {
-            const tokens = await GoogleSignin.getTokens();
-            let nextUser = buildFallbackUser(silentUser, tokens.accessToken);
-            try {
-              const serverUser = await upsertUserOnServer(tokens.accessToken, {
-                idToken: tokens.idToken ?? undefined,
-                googleSub: silentUser.id,
-                email: silentUser.email,
-                name: silentUser.name,
-                photo: silentUser.photo,
-              });
-              nextUser = {
-                googleSub: serverUser.google_sub,
-                email: serverUser.email,
-                name: serverUser.name,
-                photo: serverUser.photo_url,
-                accessToken: tokens.accessToken,
-              };
-            } catch {
-              // 네트워크 불안정 시 서버 upsert를 건너뛰고 로컬 로그인 유지
-            }
-            setUser(nextUser);
-            setIsGuestMode(false);
-            await AsyncStorage.setItem(AUTH_MODE_STORAGE_KEY, 'google');
-            await AsyncStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(nextUser));
-          }
-        } catch {
-          // silent sign-in 실패는 무시하고 저장된 로그인/게스트 모드로 진행
-        }
       } catch {
         // 저장된 로그인 정보가 깨진 경우 로그인 화면으로 진행
       } finally {
-        setIsBooting(false);
+        if (mounted) setIsBooting(false);
       }
+      void refreshSilentLogin();
     };
 
     restoreLogin();
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   const onGoogleLogin = async () => {

@@ -16,5 +16,6 @@ export interface Person {
   fatherId?: PersonId;
   motherId?: PersonId;
   spouseId?: PersonId;
+  lineageSideHint?: 'left' | 'right';
 }
 
