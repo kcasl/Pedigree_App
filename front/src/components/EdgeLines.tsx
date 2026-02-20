@@ -56,6 +56,7 @@ export function EdgeLines({
     { kind: 'pair'; aId: string; bId: string } | { kind: 'single'; parentId: string }
   > = {};
   const childIdsByGroupKey: Record<string, string[]> = {};
+  const couplesWithChildren = new Set<string>();
 
   for (const [childId, rawParentIds] of Object.entries(parentsByChild)) {
     const uniqueParentIds = Array.from(new Set(rawParentIds));
@@ -92,6 +93,7 @@ export function EdgeLines({
       if (resolvedCoupleKey) {
         const [aId, bId] = resolvedCoupleKey.split('__');
         parentGroupByChild[childId] = { kind: 'pair', aId, bId };
+        couplesWithChildren.add(resolvedCoupleKey);
         const gKey = `pair__${resolvedCoupleKey}`;
         const arr = childIdsByGroupKey[gKey] ?? [];
         arr.push(childId);
@@ -106,16 +108,28 @@ export function EdgeLines({
     }
   }
 
-  // child-centric strict rendering
-  Object.entries(parentGroupByChild).forEach(([childId, group]) => {
-    const child = nodeById[childId];
-    if (!child) return;
-    const childX = child.x + child.width / 2;
-    const childTop = child.y - attachOffset;
+  // parent-group rendering:
+  // parent(s) -> trunk -> sibling rail(가로) -> each child vertical.
+  // 이렇게 그리면 부모-자식은 항상 T/ㅠ 형태가 고정된다.
+  Object.entries(childIdsByGroupKey).forEach(([groupKey, rawChildIds]) => {
+    const childNodes = rawChildIds
+      .map(id => nodeById[id])
+      .filter((n): n is PositionedNode => Boolean(n))
+      .sort((a, b) => a.x - b.x);
+    if (!childNodes.length) return;
 
-    if (group.kind === 'pair') {
-      const a = nodeById[group.aId];
-      const b = nodeById[group.bId];
+    const childXs = childNodes.map(n => n.x + n.width / 2);
+    const childTops = childNodes.map(n => n.y - attachOffset);
+    const minChildX = Math.min(...childXs);
+    const maxChildX = Math.max(...childXs);
+    const minChildTop = Math.min(...childTops);
+    const avgChildX = childXs.reduce((sum, x) => sum + x, 0) / childXs.length;
+
+    if (groupKey.startsWith('pair__')) {
+      const pair = groupKey.replace('pair__', '');
+      const [aId, bId] = pair.split('__');
+      const a = nodeById[aId];
+      const b = nodeById[bId];
       if (!a || !b) return;
 
       const left = a.x <= b.x ? a : b;
@@ -126,12 +140,20 @@ export function EdgeLines({
       const rightBottom = right.y + right.height + attachOffset;
       const spouseY = Math.max(leftBottom, rightBottom);
       const spouseLineY = spouseY + spouseLineDrop;
-      const midX = (leftX + rightX) / 2;
+      const pairCenterX = (leftX + rightX) / 2;
+      const outwardAnchorGap = 10;
+
+      let anchorX = pairCenterX;
+      if (avgChildX < pairCenterX - 0.5) {
+        anchorX = leftX - outwardAnchorGap;
+      } else if (avgChildX > pairCenterX + 0.5) {
+        anchorX = rightX + outwardAnchorGap;
+      }
 
       if (leftBottom < spouseY) {
         lines.push(
           <View
-            key={`pair_adj_l_${childId}`}
+            key={`pair_adj_l_${pair}`}
             style={lineStyle(
               leftX - strokeWidth / 2,
               leftBottom,
@@ -146,7 +168,7 @@ export function EdgeLines({
       if (rightBottom < spouseY) {
         lines.push(
           <View
-            key={`pair_adj_r_${childId}`}
+            key={`pair_adj_r_${pair}`}
             style={lineStyle(
               rightX - strokeWidth / 2,
               rightBottom,
@@ -159,10 +181,10 @@ export function EdgeLines({
         );
       }
 
-      // pair baseline (always)
+      // spouse baseline
       lines.push(
         <View
-          key={`pair_base_${childId}`}
+          key={`pair_base_${pair}`}
           style={lineStyle(
             leftX,
             spouseLineY - strokeWidth / 2,
@@ -174,75 +196,118 @@ export function EdgeLines({
         />,
       );
 
-      // parent-center -> child (L-shape), lane offset to avoid sibling overlap
-      let midY = (spouseLineY + childTop) / 2 + lineDrop;
-      const minMid = spouseLineY + gap + lineDrop;
-      const maxMid = childTop - gap;
-      if (minMid <= maxMid) {
-        midY = Math.min(maxMid, Math.max(minMid, midY));
+      // outward ㄴ/ㄱ branch: first horizontal on spouse baseline
+      if (Math.abs(anchorX - pairCenterX) > 0.5) {
+        lines.push(
+          <View
+            key={`pair_out_h_${pair}`}
+            style={lineStyle(
+              Math.min(pairCenterX, anchorX),
+              spouseLineY - strokeWidth / 2,
+              Math.max(strokeWidth, Math.abs(anchorX - pairCenterX)),
+              strokeWidth,
+              color,
+              strokeWidth,
+            )}
+          />,
+        );
       }
 
+      let railY = spouseLineY + gap + lineDrop;
+      const maxRailY = minChildTop - gap;
+      if (railY > maxRailY) railY = (spouseLineY + minChildTop) / 2;
+
+      // trunk vertical
       lines.push(
         <View
-          key={`pair_trunk_${childId}`}
+          key={`pair_trunk_${pair}`}
           style={lineStyle(
-            midX - strokeWidth / 2,
+            anchorX - strokeWidth / 2,
             spouseLineY,
             strokeWidth,
-            Math.max(strokeWidth, midY - spouseLineY),
+            Math.max(strokeWidth, railY - spouseLineY),
             color,
             strokeWidth,
           )}
         />,
       );
+
+      // sibling rail (horizontal)
       lines.push(
         <View
-          key={`pair_h_${childId}`}
+          key={`pair_rail_${pair}`}
           style={lineStyle(
-            Math.min(midX, childX),
-            midY - strokeWidth / 2,
-            Math.max(strokeWidth, Math.abs(childX - midX)),
+            Math.min(anchorX, minChildX),
+            railY - strokeWidth / 2,
+            Math.max(strokeWidth, Math.max(anchorX, maxChildX) - Math.min(anchorX, minChildX)),
             strokeWidth,
             color,
             strokeWidth,
           )}
         />,
       );
-      lines.push(
-        <View
-          key={`pair_child_v_${childId}`}
-          style={lineStyle(
-            childX - strokeWidth / 2,
-            midY,
-            strokeWidth,
-            Math.max(strokeWidth, childTop - midY),
-            color,
-            strokeWidth,
-          )}
-        />,
-      );
+
+      // each child vertical
+      childNodes.forEach(child => {
+        const childX = child.x + child.width / 2;
+        const childTop = child.y - attachOffset;
+        lines.push(
+          <View
+            key={`pair_child_v_${pair}_${child.id}`}
+            style={lineStyle(
+              childX - strokeWidth / 2,
+              railY,
+              strokeWidth,
+              Math.max(strokeWidth, childTop - railY),
+              color,
+              strokeWidth,
+            )}
+          />,
+        );
+      });
       return;
     }
 
-    const parent = nodeById[group.parentId];
+    const parentId = groupKey.replace('single__', '');
+    const parent = nodeById[parentId];
     if (!parent) return;
+
     const parentX = parent.x + parent.width / 2;
     const parentBottom = parent.y + parent.height + attachOffset;
-    let midY = (parentBottom + childTop) / 2 + lineDrop;
-    const minMid = parentBottom + gap + lineDrop;
-    const maxMid = childTop - gap;
-    if (minMid <= maxMid) {
-      midY = Math.min(maxMid, Math.max(minMid, midY));
+    const outwardGap = 10;
+    let anchorX = parentX;
+    if (avgChildX < parentX - 0.5) anchorX = parentX - outwardGap;
+    else if (avgChildX > parentX + 0.5) anchorX = parentX + outwardGap;
+
+    // outward ㄴ/ㄱ branch for single parent
+    if (Math.abs(anchorX - parentX) > 0.5) {
+      lines.push(
+        <View
+          key={`single_out_h_${parentId}`}
+          style={lineStyle(
+            Math.min(parentX, anchorX),
+            parentBottom - strokeWidth / 2,
+            Math.max(strokeWidth, Math.abs(anchorX - parentX)),
+            strokeWidth,
+            color,
+            strokeWidth,
+          )}
+        />,
+      );
     }
+
+    let railY = parentBottom + gap + lineDrop;
+    const maxRailY = minChildTop - gap;
+    if (railY > maxRailY) railY = (parentBottom + minChildTop) / 2;
 
     lines.push(
       <View
-        key={`single_v_parent_${childId}`}
+        key={`single_trunk_${parentId}`}
         style={lineStyle(
-          parentX - strokeWidth / 2,
+          anchorX - strokeWidth / 2,
           parentBottom,
           strokeWidth,
-          Math.max(strokeWidth, midY - parentBottom),
+          Math.max(strokeWidth, railY - parentBottom),
           color,
           strokeWidth,
         )}
@@ -250,34 +315,41 @@ export function EdgeLines({
     );
     lines.push(
       <View
-        key={`single_h_${childId}`}
+        key={`single_rail_${parentId}`}
         style={lineStyle(
-          Math.min(parentX, childX),
-          midY - strokeWidth / 2,
-          Math.max(strokeWidth, Math.abs(childX - parentX)),
+          Math.min(anchorX, minChildX),
+          railY - strokeWidth / 2,
+          Math.max(strokeWidth, Math.max(anchorX, maxChildX) - Math.min(anchorX, minChildX)),
           strokeWidth,
           color,
           strokeWidth,
         )}
       />,
     );
-    lines.push(
-      <View
-        key={`single_v_child_${childId}`}
-        style={lineStyle(
-          childX - strokeWidth / 2,
-          midY,
-          strokeWidth,
-          Math.max(strokeWidth, childTop - midY),
-          color,
-          strokeWidth,
-        )}
-      />,
-    );
+    childNodes.forEach(child => {
+      const childX = child.x + child.width / 2;
+      const childTop = child.y - attachOffset;
+      lines.push(
+        <View
+          key={`single_child_v_${parentId}_${child.id}`}
+          style={lineStyle(
+            childX - strokeWidth / 2,
+            railY,
+            strokeWidth,
+            Math.max(strokeWidth, childTop - railY),
+            color,
+            strokeWidth,
+          )}
+        />
+      );
+    });
   });
 
   // Always keep spouse baseline visible
   spousePairs.forEach((pair, idx) => {
+    const key = pairKey(pair.aId, pair.bId);
+    // 자녀 연결에서 이미 부부 가로선을 그린 경우 중복선을 그리지 않는다.
+    if (couplesWithChildren.has(key)) return;
     const a = nodeById[pair.aId];
     const b = nodeById[pair.bId];
     if (!a || !b) return;

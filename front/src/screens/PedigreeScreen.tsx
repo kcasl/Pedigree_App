@@ -506,17 +506,28 @@ export function PedigreeScreen({
     const inferChildSideHint = (childId: PersonId): 'left' | 'right' => {
       const childNode = layout.nodeById[childId];
       if (!childNode) return 'left';
-      if (childNode.side === 'left') return 'left';
-      if (childNode.side === 'right') return 'right';
+      const selfNode = layout.nodeById.self;
+      const zeroX = selfNode ? selfNode.x + selfNode.width / 2 : layout.canvasWidth / 2;
+      const childCenterX = childNode.x + childNode.width / 2;
+      const eps = 0.5;
+
+      // 최우선 규칙: 부모는 항상 "나(중앙) 기준 바깥쪽"으로만 확장
+      if (childCenterX < zeroX - eps) return 'left';
+      if (childCenterX > zeroX + eps) return 'right';
+
+      // center에 걸친 경우(정중앙/동일축)는 배우자 대비 좌우로 바깥쪽 판정
       const child = peopleById[childId];
       const spouseId = child?.spouseId;
       if (spouseId) {
         const spouseNode = layout.nodeById[spouseId];
         if (spouseNode) {
-          return childNode.x <= spouseNode.x ? 'left' : 'right';
+          const spouseCenterX = spouseNode.x + spouseNode.width / 2;
+          return childCenterX <= spouseCenterX ? 'left' : 'right';
         }
       }
-      return childId === 'self' ? 'left' : 'right';
+
+      // 완전 중앙 단독 노드는 기본적으로 left로 시작
+      return 'left';
     };
     setPeopleById(prev => {
       const next: Record<PersonId, Person> = {
