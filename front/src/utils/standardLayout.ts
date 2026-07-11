@@ -6,7 +6,6 @@ import type { ActiveView } from '../types/lineage';
 import type { Person, PersonId } from '../types/pedigree';
 import type { Edge, LayoutResult, PositionedNode } from './pedigreeLayout';
 import {
-  DEFAULT_CHILDREN_PER_COUPLE,
   DEFAULT_SIBLING_SLOTS,
   focalBloodId,
   SELF_SLOT_INDEX,
@@ -30,7 +29,7 @@ export const STANDARD_LAYOUT_DEFAULTS: StandardLayoutOptions = {
   cardHeight: 128,
   spouseGap: 22,
   coupleGap: 56,
-  rowGap: 248,
+  rowGap: 256,
   childGap: 40,
   padding: 72,
 };
@@ -118,6 +117,7 @@ function placeCoupleNode(
   highlightBlood?: boolean,
 ): void {
   if (!bloodId) return;
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
 
   const push = (
     id: PersonId,
@@ -125,6 +125,8 @@ function placeCoupleNode(
     role: 'blood' | 'spouse' | 'single',
     partner?: PersonId,
   ) => {
+    if (!id || nodeById[id]) return;
+    if (!Number.isFinite(nx) || !Number.isFinite(y)) return;
     const node: PositionedNode = {
       id,
       x: nx,
@@ -146,6 +148,149 @@ function placeCoupleNode(
   if (spouseId) {
     push(spouseId, x + opts.cardWidth + opts.spouseGap, 'spouse', bloodId);
   }
+}
+
+type ChildEntry = {
+  id: PersonId;
+  spouseId?: PersonId;
+  width: number;
+};
+
+type ChildPlacement = ChildEntry & { targetX: number };
+
+type ChildGroupResolved = {
+  parentCenterX: number;
+  placements: ChildPlacement[];
+};
+
+/** 부모 부부 기준 피라미드 중심점 */
+function pyramidCenters(
+  count: number,
+  coupleCenter: number,
+  leftParentCenter: number,
+  rightParentCenter: number | undefined,
+  slotStep: number,
+): number[] {
+  if (count <= 0) return [];
+  if (count === 1) return [coupleCenter];
+  if (count === 2) {
+    if (rightParentCenter != null && leftParentCenter !== rightParentCenter) {
+      return [
+        Math.min(leftParentCenter, rightParentCenter),
+        Math.max(leftParentCenter, rightParentCenter),
+      ];
+    }
+    return [coupleCenter - slotStep / 2, coupleCenter + slotStep / 2];
+  }
+  if (count === 3) {
+    if (rightParentCenter != null && leftParentCenter !== rightParentCenter) {
+      return [
+        Math.min(leftParentCenter, rightParentCenter),
+        coupleCenter,
+        Math.max(leftParentCenter, rightParentCenter),
+      ];
+    }
+    return [coupleCenter - slotStep, coupleCenter, coupleCenter + slotStep];
+  }
+
+  const centers: number[] = [coupleCenter];
+  let step = 1;
+  while (centers.length < count) {
+    centers.push(coupleCenter - slotStep * step);
+    if (centers.length < count) centers.push(coupleCenter + slotStep * step);
+    step += 1;
+  }
+  return centers.sort((a, b) => a - b);
+}
+
+function buildPyramidPlacements(
+  entries: ChildEntry[],
+  coupleCenter: number,
+  coupleLeftX: number,
+  hasSpouse: boolean,
+  opts: StandardLayoutOptions,
+): ChildPlacement[] {
+  if (!entries.length) return [];
+  const leftParentCenter = coupleLeftX + opts.cardWidth / 2;
+  const rightParentCenter = hasSpouse
+    ? coupleLeftX + opts.cardWidth + opts.spouseGap + opts.cardWidth / 2
+    : undefined;
+  const slotStep = opts.cardWidth + opts.childGap;
+  const centers = pyramidCenters(
+    entries.length,
+    coupleCenter,
+    leftParentCenter,
+    rightParentCenter,
+    slotStep,
+  );
+  if (centers.length !== entries.length) {
+    const fallbackStep = slotStep;
+    const start = coupleCenter - ((entries.length - 1) * fallbackStep) / 2;
+    for (let i = 0; i < entries.length; i += 1) {
+      centers[i] = start + i * fallbackStep;
+    }
+    centers.length = entries.length;
+  }
+  const placements = entries
+    .map((entry, idx) => ({
+      ...entry,
+      targetX: (centers[idx] ?? coupleCenter) - entry.width / 2,
+    }))
+    .filter(p => Number.isFinite(p.targetX))
+    .sort((a, b) => a.targetX - b.targetX);
+
+  for (let i = 1; i < placements.length; i += 1) {
+    const prev = placements[i - 1];
+    const cur = placements[i];
+    const minX = prev.targetX + prev.width + opts.childGap;
+    if (cur.targetX < minX) cur.targetX = minX;
+  }
+
+  if (placements.length > 0) {
+    const left = placements[0].targetX;
+    const right =
+      placements[placements.length - 1].targetX + placements[placements.length - 1].width;
+    const mid = (left + right) / 2;
+    const shift = coupleCenter - mid;
+    if (Number.isFinite(shift) && Math.abs(shift) > 0.1) {
+      placements.forEach(p => {
+        p.targetX += shift;
+      });
+    }
+  }
+  return placements;
+}
+
+/** 부모 아래 피라미드 유지. 옆 그룹과 겹치면 그룹 통째로만 밀어냄. */
+function resolveGroupCollisions(
+  groups: ChildGroupResolved[],
+  gap: number,
+): ChildGroupResolved[] {
+  const planned = [...groups]
+    .filter(g => g.placements.length > 0)
+    .sort((a, b) => a.parentCenterX - b.parentCenterX);
+
+  for (let i = 1; i < planned.length; i += 1) {
+    const prev = planned[i - 1];
+    const cur = planned[i];
+    if (!prev.placements.length || !cur.placements.length) continue;
+    const prevRight = prev.placements.reduce(
+      (acc, p) => Math.max(acc, p.targetX + p.width),
+      Number.NEGATIVE_INFINITY,
+    );
+    const curLeft = cur.placements.reduce(
+      (acc, p) => Math.min(acc, p.targetX),
+      Number.POSITIVE_INFINITY,
+    );
+    if (!Number.isFinite(prevRight) || !Number.isFinite(curLeft)) continue;
+    const overlap = prevRight + gap - curLeft;
+    if (overlap > 0) {
+      cur.placements.forEach(p => {
+        p.targetX += overlap;
+      });
+    }
+  }
+  return planned;
 }
 
 export function buildStandardPedigreeLayout(
@@ -177,12 +322,27 @@ export function buildStandardPedigreeLayout(
   const nodeById: Record<PersonId, PositionedNode> = {};
   const highlightIds = new Set<PersonId>([focalId]);
 
-  const ancestorRows = 2;
+  const hasGreat = !!people[slots.ggf];
+  const ancestorRows = hasGreat ? 3 : 2;
   const ySibling = opts.padding + opts.rowGap * ancestorRows;
   const yParent = ySibling - opts.rowGap;
   const yGrand = yParent - opts.rowGap;
+  const yGreat = yGrand - opts.rowGap;
 
   const focalCenterX = coupleCenterX(siblingRowStartX, focalIndex, opts);
+  const parentCoupleX = focalCenterX - uw / 2;
+  const fatherCenterX = parentCoupleX + opts.cardWidth / 2;
+  const motherCenterX = parentCoupleX + opts.cardWidth + opts.spouseGap + opts.cardWidth / 2;
+  const hasPaternalGrand = !!people[slots.gf];
+  const hasMaternalGrand = !!people[slots.mgf];
+  const paternalGrandX =
+    hasPaternalGrand && hasMaternalGrand
+      ? focalCenterX - opts.coupleGap / 2 - uw
+      : fatherCenterX - uw / 2;
+  const maternalGrandX =
+    hasPaternalGrand && hasMaternalGrand
+      ? focalCenterX + opts.coupleGap / 2
+      : motherCenterX - uw / 2;
 
   siblingCouples.forEach((couple, i) => {
     if (!people[couple.blood]) return;
@@ -206,7 +366,7 @@ export function buildStandardPedigreeLayout(
       nodeById,
       slots.father,
       people[slots.mother] ? slots.mother : undefined,
-      focalCenterX - uw / 2,
+      parentCoupleX,
       yParent,
       -1,
       opts,
@@ -218,41 +378,178 @@ export function buildStandardPedigreeLayout(
       nodeById,
       slots.gf,
       people[slots.gm] ? slots.gm : undefined,
-      focalCenterX - uw / 2,
+      paternalGrandX,
       yGrand,
       -2,
       opts,
     );
   }
+  if (people[slots.mgf]) {
+    placeCoupleNode(
+      nodes,
+      nodeById,
+      slots.mgf,
+      people[slots.mgm] ? slots.mgm : undefined,
+      maternalGrandX,
+      yGrand,
+      -2,
+      opts,
+    );
+  }
+  if (people[slots.ggf]) {
+    placeCoupleNode(
+      nodes,
+      nodeById,
+      slots.ggf,
+      people[slots.ggm] ? slots.ggm : undefined,
+      paternalGrandX,
+      yGreat,
+      -3,
+      opts,
+    );
+  }
 
   const yChild = ySibling + opts.rowGap;
+  const childUnits: Array<{ bloodId: PersonId; spouseId?: PersonId; centerX: number }> = [];
+  const placedChildIds = new Set<PersonId>();
+
+  const childGroupDrafts: ChildGroupResolved[] = [];
   siblingCouples.forEach((couple, i) => {
     const kids = collectChildren(people, couple.blood, couple.spouse);
-    const coupleCenter = coupleCenterX(siblingRowStartX, i, opts);
-    const childCount = Math.max(kids.length, DEFAULT_CHILDREN_PER_COUPLE);
-    const childRowW =
-      childCount * opts.cardWidth + (childCount - 1) * opts.childGap;
-    const childStartX = coupleCenter - childRowW / 2;
-
-    kids.forEach((kidId, ki) => {
-      if (!people[kidId]) return;
-      const nx = childStartX + ki * (opts.cardWidth + opts.childGap);
-      placeCoupleNode(nodes, nodeById, kidId, undefined, nx, yChild, 1, opts);
-    });
-
-    slots.children[i]?.forEach((cid, ci) => {
-      if (people[cid] && !nodeById[cid]) {
-        const nx = childStartX + ci * (opts.cardWidth + opts.childGap);
-        placeCoupleNode(nodes, nodeById, cid, undefined, nx, yChild, 1, opts);
+    const orderedIds: PersonId[] = [];
+    for (const kidId of kids) {
+      if (people[kidId] && !placedChildIds.has(kidId)) {
+        orderedIds.push(kidId);
+        placedChildIds.add(kidId);
       }
+    }
+    for (const cid of slots.children[i] ?? []) {
+      if (people[cid] && !placedChildIds.has(cid)) {
+        orderedIds.push(cid);
+        placedChildIds.add(cid);
+      }
+    }
+    if (!orderedIds.length) return;
+
+    const entries: ChildEntry[] = orderedIds.map(id => {
+      const spouseId =
+        people[id]?.spouseId && people[people[id].spouseId!]
+          ? people[id].spouseId
+          : undefined;
+      return {
+        id,
+        spouseId,
+        width: spouseId ? uw : opts.cardWidth,
+      };
+    });
+    const coupleCenter = coupleCenterX(siblingRowStartX, i, opts);
+    const coupleLeftX = coupleCenter - uw / 2;
+    const hasSpouse = !!(couple.spouse && people[couple.spouse]);
+    childGroupDrafts.push({
+      parentCenterX: coupleCenter,
+      placements: buildPyramidPlacements(entries, coupleCenter, coupleLeftX, hasSpouse, opts),
     });
   });
 
-  const canvasHeight = yChild + opts.cardHeight + opts.padding + 100;
+  const childGroups = resolveGroupCollisions(childGroupDrafts, opts.childGap);
+  let maxContentRight = siblingRowStartX + rowW;
+  childGroups.forEach(group => {
+    group.placements.forEach(entry => {
+      placeCoupleNode(nodes, nodeById, entry.id, entry.spouseId, entry.targetX, yChild, 1, opts);
+      childUnits.push({
+        bloodId: entry.id,
+        spouseId: entry.spouseId,
+        centerX: entry.targetX + entry.width / 2,
+      });
+      maxContentRight = Math.max(maxContentRight, entry.targetX + entry.width);
+    });
+  });
+
+  let canvasBottomY = yChild;
+
+  if (opts.view === 'self') {
+    let currentUnits = childUnits;
+    let nextGeneration = 2;
+    let rowY = yChild;
+    const placedDescendantIds = new Set<PersonId>();
+
+    for (let depth = 0; depth < 6; depth++) {
+      rowY += opts.rowGap;
+      const nextUnits: Array<{ bloodId: PersonId; spouseId?: PersonId; centerX: number }> = [];
+      const descDrafts: ChildGroupResolved[] = [];
+
+      const orderedParents = [...currentUnits].sort((a, b) => a.centerX - b.centerX);
+      orderedParents.forEach(unit => {
+        const descendants = collectChildren(people, unit.bloodId, unit.spouseId).filter(
+          id => !placedDescendantIds.has(id) && !!people[id],
+        );
+        if (!descendants.length) return;
+
+        const entries: ChildEntry[] = descendants.map(descId => {
+          const descSpouseId =
+            people[descId]?.spouseId && people[people[descId].spouseId!]
+              ? people[descId].spouseId
+              : undefined;
+          return {
+            id: descId,
+            spouseId: descSpouseId,
+            width: descSpouseId ? uw : opts.cardWidth,
+          };
+        });
+        const coupleLeftX = unit.centerX - (unit.spouseId ? uw : opts.cardWidth) / 2;
+        descDrafts.push({
+          parentCenterX: unit.centerX,
+          placements: buildPyramidPlacements(
+            entries,
+            unit.centerX,
+            coupleLeftX,
+            !!unit.spouseId,
+            opts,
+          ),
+        });
+      });
+
+      if (!descDrafts.length) break;
+
+      const descGroups = resolveGroupCollisions(descDrafts, opts.childGap);
+      descGroups.forEach(group => {
+        group.placements.forEach(entry => {
+          placeCoupleNode(
+            nodes,
+            nodeById,
+            entry.id,
+            entry.spouseId,
+            entry.targetX,
+            rowY,
+            nextGeneration,
+            opts,
+          );
+          nextUnits.push({
+            bloodId: entry.id,
+            spouseId: entry.spouseId,
+            centerX: entry.targetX + entry.width / 2,
+          });
+          placedDescendantIds.add(entry.id);
+          maxContentRight = Math.max(maxContentRight, entry.targetX + entry.width);
+        });
+      });
+
+      canvasBottomY = rowY;
+      currentUnits = nextUnits;
+      nextGeneration += 1;
+      if (!currentUnits.length) break;
+    }
+  }
+
+  const canvasHeight = canvasBottomY + opts.cardHeight + opts.padding + 100;
+  const computedWidth = Math.max(
+    canvasWidth,
+    Number.isFinite(maxContentRight) ? maxContentRight + opts.padding * 2 : canvasWidth,
+  );
 
   return {
-    canvasWidth,
-    canvasHeight,
+    canvasWidth: Number.isFinite(computedWidth) ? computedWidth : 1600,
+    canvasHeight: Number.isFinite(canvasHeight) ? canvasHeight : 1200,
     nodes,
     edges: computeEdges(people),
     nodeById,

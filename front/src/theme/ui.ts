@@ -19,7 +19,7 @@ export const ui = {
     dangerBg: '#fff1f2',
     dangerBorder: '#fecaca',
     overlay: 'rgba(15,23,42,0.38)',
-    line: '#334155',
+    line: '#000000',
   },
   generationLine(gen: number): string {
     const palette = this.generationPalette;

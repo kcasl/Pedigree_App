@@ -1,5 +1,14 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  Modal,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+  type LayoutChangeEvent,
+} from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
@@ -18,16 +27,18 @@ import { ENABLE_SERVER_SYNC } from '../config/features';
 import type { ActiveView, PedigreeStore } from '../types/lineage';
 import { ACTIVE_VIEW_BG, ACTIVE_VIEW_LABEL } from '../types/lineage';
 import {
-  clearNodeOffsets,
   clearPedigreePeople,
-  loadNodeOffsets,
   loadPedigreeStore,
   parseStoredPeople,
-  saveNodeOffsets,
   savePedigreeStore,
 } from '../storage/pedigreeStorage';
 import { nowIso } from '../utils/date';
-import { createDefaultStore, migrateLegacyToStore, slotIdsForView } from '../utils/standardTemplate';
+import {
+  createDefaultStore,
+  migrateLegacyToStore,
+  SELF_SLOT_INDEX,
+  slotIdsForView,
+} from '../utils/standardTemplate';
 import { buildStandardPedigreeLayout, STANDARD_LAYOUT_DEFAULTS } from '../utils/standardLayout';
 import type { PositionedNode } from '../utils/pedigreeLayout';
 import { ui } from '../theme/ui';
@@ -38,9 +49,7 @@ type PendingAdd =
   | { kind: 'parent'; childId: PersonId; parentType: ParentType }
   | { kind: 'sibling'; ofId: PersonId }
   | { kind: 'child'; parentId: PersonId }
-  | { kind: 'spouse'; ofId: PersonId }
-  | { kind: 'paternalPlus' }
-  | { kind: 'maternalPlus' };
+  | { kind: 'spouse'; ofId: PersonId };
 
 type AuthSession = {
   googleSub: string;
@@ -72,13 +81,27 @@ function roleLabel(view: ActiveView, personId: PersonId): string {
   if (personId === s.father) return '부';
   if (personId === s.mother) return '모';
   if (personId === s.spouseId) return '배우자';
-  if (personId === s.gf || personId === s.ggm) return '조부모';
+  if (personId === s.gf || personId === s.gm || personId === s.mgf || personId === s.mgm) {
+    return '조부모';
+  }
   if (personId === s.ggf || personId === s.ggm) return '증조부모';
   const sibIdx = s.siblings.findIndex(p => p.blood === personId || p.spouse === personId);
   if (sibIdx >= 0) {
     const pair = s.siblings[sibIdx];
     if (personId === pair.spouse) return '배우자';
-    return sibIdx < 2 ? '형제' : '형제';
+    return '형제';
+  }
+
+  if (view === 'self') {
+    const selfChildSet = new Set(s.children[SELF_SLOT_INDEX] ?? []);
+    if (selfChildSet.has(personId)) return '자식';
+
+    const siblingChildSet = new Set(
+      s.children.flatMap((ids, idx) => (s.siblings[idx].blood === s.selfId ? [] : ids)),
+    );
+    if (siblingChildSet.has(personId)) return '조카';
+
+    if (personId.startsWith('me_gc')) return '손자';
   }
   return '친족';
 }
@@ -130,7 +153,6 @@ export function PedigreeScreen({
   const switchLineageView = (view: ActiveView) => {
     const nextSlots = slotIdsForView(view);
     setStore(prev => ({ ...prev, activeView: view }));
-    setNodeXOffsetById({});
     setSelectedId(nextSlots.selfId);
     setActionVisible(false);
   };
@@ -156,10 +178,9 @@ export function PedigreeScreen({
   const [pendingAdd, setPendingAdd] = useState<PendingAdd | null>(null);
   const [editingId, setEditingId] = useState<PersonId | null>(null);
   const [detailId, setDetailId] = useState<PersonId | null>(null);
-  const [nodeXOffsetById, setNodeXOffsetById] = useState<Record<PersonId, number>>({});
-  const [canvasPanEnabled, setCanvasPanEnabled] = useState(true);
-  const nodeDragCountRef = useRef(0);
   const [settingsVisible, setSettingsVisible] = useState(false);
+  const [usageVisible, setUsageVisible] = useState(false);
+  const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
 
   const selectedDetail = detailId ? peopleById[detailId] : undefined;
 
@@ -216,7 +237,6 @@ export function PedigreeScreen({
     const hydrate = async () => {
       try {
         const localStore = await loadPedigreeStore();
-        const savedOffsets = await loadNodeOffsets(localStore?.activeView ?? 'paternal');
         if (mounted && localStore) {
           setStore(localStore);
           lastSyncedPeopleRef.current = localStore.views[localStore.activeView];
@@ -226,7 +246,6 @@ export function PedigreeScreen({
           setStore(initial);
           lastSyncedPeopleRef.current = initial.views.paternal;
         }
-        if (mounted) setNodeXOffsetById(savedOffsets);
 
         if (ENABLE_SERVER_SYNC) {
           const queueRaw = await AsyncStorage.getItem(legacyQueueStorageKey);
@@ -291,11 +310,6 @@ export function PedigreeScreen({
 
   useEffect(() => {
     if (!isHydrated) return;
-    void loadNodeOffsets(activeView).then(setNodeXOffsetById);
-  }, [activeView, isHydrated]);
-
-  useEffect(() => {
-    if (!isHydrated) return;
     savePedigreeStore(store)
       .then(() => {
         setLocalSaveStatus('saved');
@@ -304,28 +318,6 @@ export function PedigreeScreen({
         setLocalSaveStatus('error');
       });
   }, [isHydrated, store]);
-
-  // 삭제된 인물의 수동 위치 오프셋 제거
-  useEffect(() => {
-    if (!isHydrated) return;
-    setNodeXOffsetById(prev => {
-      const ids = new Set(Object.keys(peopleById));
-      let changed = false;
-      const next: Record<PersonId, number> = {};
-      for (const [id, offset] of Object.entries(prev)) {
-        if (ids.has(id)) next[id as PersonId] = offset;
-        else changed = true;
-      }
-      return changed ? next : prev;
-    });
-  }, [isHydrated, peopleById]);
-
-  useEffect(() => {
-    if (!isHydrated) return;
-    saveNodeOffsets(activeView, nodeXOffsetById).catch(() => {
-      setLocalSaveStatus('error');
-    });
-  }, [isHydrated, activeView, nodeXOffsetById]);
 
   useEffect(() => {
     if (!ENABLE_SERVER_SYNC) return;
@@ -395,12 +387,6 @@ export function PedigreeScreen({
       const next: Record<PersonId, Person> = { ...prev };
       delete next[id];
       deletedIdsRef.current.add(id);
-      setNodeXOffsetById(prev => {
-        if (!prev[id]) return prev;
-        const next = { ...prev };
-        delete next[id];
-        return next;
-      });
       // detach links from remaining people
       for (const p of Object.values(next)) {
         if (p.fatherId === id) p.fatherId = undefined;
@@ -420,14 +406,29 @@ export function PedigreeScreen({
 
   const displayLayout = useMemo(() => {
     const nodeById: Record<PersonId, PositionedNode> = {};
-    const nodes = layout.nodes.map(n => {
-      const dx = nodeXOffsetById[n.id] ?? 0;
-      const next = { ...n, x: n.x + dx };
+    const nodes: PositionedNode[] = [];
+    for (const n of layout.nodes) {
+      if (
+        !Number.isFinite(n.x) ||
+        !Number.isFinite(n.y) ||
+        !Number.isFinite(n.width) ||
+        !Number.isFinite(n.height)
+      ) {
+        continue;
+      }
+      if (nodeById[n.id]) continue;
+      const next = {
+        ...n,
+        x: Math.round(n.x),
+        y: Math.round(n.y),
+      };
       nodeById[n.id] = next;
-      return next;
-    });
-    return { ...layout, nodes, nodeById };
-  }, [layout, nodeXOffsetById]);
+      nodes.push(next);
+    }
+    const canvasWidth = Number.isFinite(layout.canvasWidth) ? layout.canvasWidth : 1600;
+    const canvasHeight = Number.isFinite(layout.canvasHeight) ? layout.canvasHeight : 1200;
+    return { ...layout, nodes, nodeById, canvasWidth, canvasHeight };
+  }, [layout]);
 
   const spousePairs = useMemo(() => {
     const pairs: Array<{ aId: PersonId; bId: PersonId }> = [];
@@ -462,27 +463,67 @@ export function PedigreeScreen({
   const translateY = useSharedValue(0);
   const savedX = useSharedValue(0);
   const savedY = useSharedValue(0);
+  const displayLayoutRef = useRef(displayLayout);
+  displayLayoutRef.current = displayLayout;
+  const stageSizeRef = useRef(stageSize);
+  stageSizeRef.current = stageSize;
 
-  const handleNodeDragActive = (active: boolean) => {
-    if (active) {
-      nodeDragCountRef.current += 1;
-      setCanvasPanEnabled(false);
-      return;
+  const centerOnPedigree = useCallback((animated = true) => {
+    const sw = stageSizeRef.current.width;
+    const sh = stageSizeRef.current.height;
+    if (sw <= 0 || sh <= 0) return;
+
+    const layout = displayLayoutRef.current;
+    const cw = layout.canvasWidth;
+    const ch = layout.canvasHeight;
+    if (!Number.isFinite(cw) || !Number.isFinite(ch) || cw <= 0 || ch <= 0) return;
+
+    const focal = layout.nodeById[layout.selfId];
+    const focusX = focal ? focal.x + focal.width / 2 : cw / 2;
+    const focusY = focal ? focal.y + focal.height / 2 : ch / 2;
+    if (!Number.isFinite(focusX) || !Number.isFinite(focusY)) return;
+
+    const pad = 28;
+    const fit = Math.min(
+      (sw - pad * 2) / Math.max(cw, 1),
+      (sh - pad * 2) / Math.max(ch, 1),
+      0.95,
+    );
+    const nextScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, Math.max(fit, 0.4)));
+    // RN 기본 scale 기준점(center)에 맞춘 translate
+    const nextX = sw / 2 - cw / 2 - (focusX - cw / 2) * nextScale;
+    const nextY = sh / 2 - ch / 2 - (focusY - ch / 2) * nextScale;
+    if (![nextX, nextY, nextScale].every(Number.isFinite)) return;
+
+    if (animated) {
+      scale.value = withTiming(nextScale, { duration: 180 });
+      translateX.value = withTiming(nextX, { duration: 180 });
+      translateY.value = withTiming(nextY, { duration: 180 });
+    } else {
+      scale.value = nextScale;
+      translateX.value = nextX;
+      translateY.value = nextY;
     }
-    nodeDragCountRef.current = Math.max(0, nodeDragCountRef.current - 1);
-    if (nodeDragCountRef.current === 0) setCanvasPanEnabled(true);
-  };
+    savedScale.value = nextScale;
+    savedX.value = nextX;
+    savedY.value = nextY;
+  }, [savedScale, savedX, savedY, scale, translateX, translateY]);
 
-  const handleNodeOffsetChange = (id: PersonId, offsetX: number) => {
-    setNodeXOffsetById(prev => {
-      if (Math.abs(offsetX) < 0.5) {
-        if (prev[id] == null) return prev;
-        const next = { ...prev };
-        delete next[id];
-        return next;
-      }
-      return { ...prev, [id]: offsetX };
-    });
+  useEffect(() => {
+    if (!isHydrated) return;
+    if (stageSize.width <= 0 || stageSize.height <= 0) return;
+    const timer = setTimeout(() => {
+      centerOnPedigree(true);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [activeView, centerOnPedigree, isHydrated, stageSize.height, stageSize.width]);
+
+  const onStageLayout = (e: LayoutChangeEvent) => {
+    const { width, height } = e.nativeEvent.layout;
+    if (width <= 0 || height <= 0) return;
+    setStageSize(prev =>
+      prev.width === width && prev.height === height ? prev : { width, height },
+    );
   };
 
   const pinch = useMemo(
@@ -500,7 +541,6 @@ export function PedigreeScreen({
   const pan = useMemo(
     () =>
       Gesture.Pan()
-        .enabled(canvasPanEnabled)
         .minPointers(1)
         .minDistance(4)
         .averageTouches(true)
@@ -512,7 +552,7 @@ export function PedigreeScreen({
           translateX.value = savedX.value + e.translationX;
           translateY.value = savedY.value + e.translationY;
         }),
-    [canvasPanEnabled, savedX, savedY, translateX, translateY],
+    [savedX, savedY, translateX, translateY],
   );
 
   const composed = useMemo(() => Gesture.Simultaneous(pinch, pan), [pinch, pan]);
@@ -526,36 +566,35 @@ export function PedigreeScreen({
   }));
 
   const zoomBy = (factor: number) => {
-    scale.value = withTiming(clampScaleOnJs(scale.value * factor), {
-      duration: 140,
-    });
+    const next = clampScaleOnJs(scale.value * factor);
+    const sw = stageSize.width;
+    const sh = stageSize.height;
+    const cw = displayLayout.canvasWidth;
+    const ch = displayLayout.canvasHeight;
+    if (sw > 0 && sh > 0 && cw > 0 && ch > 0) {
+      const cx = sw / 2;
+      const cy = sh / 2;
+      const worldX = (cx - translateX.value - cw / 2) / scale.value + cw / 2;
+      const worldY = (cy - translateY.value - ch / 2) / scale.value + ch / 2;
+      const nextX = cx - cw / 2 - (worldX - cw / 2) * next;
+      const nextY = cy - ch / 2 - (worldY - ch / 2) * next;
+      if ([nextX, nextY].every(Number.isFinite)) {
+        scale.value = withTiming(next, { duration: 140 });
+        translateX.value = withTiming(nextX, { duration: 140 });
+        translateY.value = withTiming(nextY, { duration: 140 });
+        savedScale.value = next;
+        savedX.value = nextX;
+        savedY.value = nextY;
+        return;
+      }
+    }
+    scale.value = withTiming(next, { duration: 140 });
+    savedScale.value = next;
   };
 
   const openActionsFor = (id: PersonId) => {
     setSelectedId(id);
     setActionVisible(true);
-  };
-
-  const openPaternalPlus = () => {
-    const father = peopleById[slots.father];
-    if (!father?.fatherId && !father?.motherId) {
-      Alert.alert('먼저 조부모를 등록하세요', '친가 확장은 아버지 부모 정보가 필요합니다.');
-      setSelectedId(slots.father);
-      setActionVisible(true);
-      return;
-    }
-    setPendingAdd({ kind: 'paternalPlus' });
-  };
-
-  const openMaternalPlus = () => {
-    const mother = peopleById[slots.mother];
-    if (!mother?.fatherId && !mother?.motherId) {
-      Alert.alert('먼저 조부모를 등록하세요', '외가 확장은 어머니 부모 정보가 필요합니다.');
-      setSelectedId(slots.mother);
-      setActionVisible(true);
-      return;
-    }
-    setPendingAdd({ kind: 'maternalPlus' });
   };
 
   const addTitle = useMemo(() => {
@@ -569,10 +608,6 @@ export function PedigreeScreen({
         return '자녀 추가';
       case 'spouse':
         return '배우자 추가';
-      case 'paternalPlus':
-        return '친가 인물 추가(아버지 형제)';
-      case 'maternalPlus':
-        return '외가 인물 추가(어머니 형제)';
       default:
         return '인물 등록';
     }
@@ -643,32 +678,11 @@ export function PedigreeScreen({
           next[action.ofId] = { ...base, spouseId: person.id };
           next[person.id] = { ...next[person.id], spouseId: action.ofId };
         }
-      } else if (action.kind === 'paternalPlus') {
-        const base = next[slots.father];
-        if (base?.fatherId || base?.motherId) {
-          next[person.id] = {
-            ...next[person.id],
-            fatherId: base.fatherId,
-            motherId: base.motherId,
-            lineageSideHint: 'left',
-          };
-        }
-      } else if (action.kind === 'maternalPlus') {
-        const base = next[slots.mother];
-        if (base?.fatherId || base?.motherId) {
-          next[person.id] = {
-            ...next[person.id],
-            fatherId: base.fatherId,
-            motherId: base.motherId,
-            lineageSideHint: 'right',
-          };
-        }
       }
 
       return next;
     });
 
-    setNodeXOffsetById({});
     setPendingAdd(null);
   };
 
@@ -704,13 +718,11 @@ export function PedigreeScreen({
           const initial = createInitialStore();
           setStore(initial);
           setSelectedId(slotIdsForView('self').selfId);
-          setNodeXOffsetById({});
           lastSyncedPeopleRef.current = initial.views.paternal;
           deletedIdsRef.current.clear();
           queueRef.current = [];
           setSyncStatus('idle');
           await clearPedigreePeople();
-          await clearNodeOffsets();
 
           if (ENABLE_SERVER_SYNC && auth?.googleSub && auth.accessToken) {
             try {
@@ -760,6 +772,12 @@ export function PedigreeScreen({
   };
 
   const screenBg = ACTIVE_VIEW_BG[activeView];
+  const safeCanvasWidth = Number.isFinite(displayLayout.canvasWidth)
+    ? Math.max(1, Math.round(displayLayout.canvasWidth))
+    : 1600;
+  const safeCanvasHeight = Number.isFinite(displayLayout.canvasHeight)
+    ? Math.max(1, Math.round(displayLayout.canvasHeight))
+    : 1200;
 
   if (!isHydrated) {
     return (
@@ -777,7 +795,7 @@ export function PedigreeScreen({
       <View style={[styles.header, { backgroundColor: screenBg }]}>
         <View style={styles.headerTopRow}>
           <View style={styles.headerTitleWrap}>
-            <Text style={styles.headerTitle}>족보</Text>
+            <Text style={styles.headerTitle}>가족가계도</Text>
             <Text style={[styles.viewBadge, { backgroundColor: ACTIVE_VIEW_BG[activeView] }]}>
               {ACTIVE_VIEW_LABEL[activeView]} 시점
             </Text>
@@ -791,11 +809,11 @@ export function PedigreeScreen({
             <Pressable style={styles.settingsBtn} onPress={() => setSettingsVisible(true)}>
               <Text style={styles.settingsBtnText}>설정</Text>
             </Pressable>
+            <Pressable style={styles.settingsBtn} onPress={() => setUsageVisible(true)}>
+              <Text style={styles.settingsBtnText}>사용법 보기</Text>
+            </Pressable>
           </View>
         </View>
-        <Text style={styles.headerSub}>
-          인물 탭으로 추가/수정 · 아버지·어머니·배우자에서 집안 전환
-        </Text>
         <Text style={styles.syncText}>
           {localSaveStatus === 'error'
             ? '기기 저장 실패'
@@ -809,17 +827,17 @@ export function PedigreeScreen({
                     : syncStatus === 'error'
                       ? '동기화 오류 (재시도 예정)'
                       : '동기화 대기'
-              : '기기에 저장됨 · 위치 조정 포함'}
+              : '기기에 저장됨'}
         </Text>
       </View>
 
-      <View style={[styles.stage, { backgroundColor: screenBg }]}>
+      <View style={[styles.stage, { backgroundColor: screenBg }]} onLayout={onStageLayout}>
         <GestureDetector gesture={composed}>
           <Animated.View
             style={[
               {
-                width: displayLayout.canvasWidth,
-                height: displayLayout.canvasHeight,
+                width: safeCanvasWidth,
+                height: safeCanvasHeight,
                 backgroundColor: screenBg,
               },
               canvasStyle,
@@ -831,7 +849,7 @@ export function PedigreeScreen({
               spousePairs={spousePairs}
             />
 
-            {layout.nodes.map(n => {
+            {displayLayout.nodes.map(n => {
               const p = peopleById[n.id];
               if (!p) return null;
               return (
@@ -840,29 +858,15 @@ export function PedigreeScreen({
                     person={p}
                     label={kinshipLabelById[p.id] ?? p.name}
                     width={n.width}
-                    savedOffsetX={nodeXOffsetById[n.id] ?? 0}
-                    canvasScale={scale}
                     highlighted={layout.highlightIds.has(n.id)}
                     generation={n.generation}
                     onPress={() => openActionsFor(n.id)}
-                    onOffsetChange={offsetX => handleNodeOffsetChange(n.id, offsetX)}
-                    onDragActiveChange={handleNodeDragActive}
                   />
                 </View>
               );
             })}
           </Animated.View>
         </GestureDetector>
-
-        {/* 캔버스와 별개로 고정된 + 버튼(헤더 아래에 항상 보이게) */}
-        <Pressable style={styles.sidePlusLeft} onPress={openPaternalPlus}>
-          <Text style={styles.sidePlusText}>+</Text>
-        </Pressable>
-        <Text style={styles.sidePlusHintLeft}>형제 줄 확장</Text>
-        <Pressable style={styles.sidePlusRight} onPress={openMaternalPlus}>
-          <Text style={styles.sidePlusText}>+</Text>
-        </Pressable>
-        <Text style={styles.sidePlusHintRight}>가족 인물 추가</Text>
       </View>
 
       {/* 줌 컨트롤 */}
@@ -1122,6 +1126,34 @@ export function PedigreeScreen({
           </Pressable>
         </Pressable>
       </Modal>
+
+      <Modal
+        transparent
+        visible={usageVisible}
+        animationType="fade"
+        onRequestClose={() => setUsageVisible(false)}
+      >
+        <Pressable style={styles.sheetBackdrop} onPress={() => setUsageVisible(false)}>
+          <Pressable style={styles.settingsSheet} onPress={() => {}}>
+            <Text style={styles.settingsTitle}>사용법</Text>
+            <Text style={styles.settingsDesc}>1) 인물 카드 탭 → 작업 메뉴 열기</Text>
+            <Text style={styles.settingsSubDesc}>
+              부모/형제/배우자/자녀 추가, 정보 수정/삭제를 카드별로 실행할 수 있습니다.
+            </Text>
+            <Text style={styles.settingsDesc}>2) 시점 전환</Text>
+            <Text style={styles.settingsSubDesc}>
+              아버지/어머니/배우자 카드에서 해당 집안 시점으로 전환할 수 있습니다.
+            </Text>
+            <Text style={styles.settingsDesc}>3) 이동/확대</Text>
+            <Text style={styles.settingsSubDesc}>
+              핀치로 확대/축소, 드래그로 화면을 이동할 수 있습니다.
+            </Text>
+            <Pressable style={styles.settingsCloseBtn} onPress={() => setUsageVisible(false)}>
+              <Text style={styles.settingsCloseBtnText}>닫기</Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -1144,7 +1176,7 @@ const styles = StyleSheet.create({
   header: {
     paddingHorizontal: 16,
     paddingTop: 12,
-    paddingBottom: 10,
+    paddingBottom: 8,
     borderBottomWidth: 1,
     borderBottomColor: 'rgba(0,0,0,0.06)',
     zIndex: 10,
@@ -1192,12 +1224,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: ui.weight.title,
   },
-  headerSub: {
-    marginTop: 4,
-    color: ui.color.textSecondary,
-    fontSize: 12,
-    fontWeight: ui.weight.body,
-  },
   settingsBtn: {
     borderRadius: 10,
     borderWidth: 1,
@@ -1223,72 +1249,6 @@ const styles = StyleSheet.create({
   },
   node: {
     position: 'absolute',
-  },
-  sidePlusLeft: {
-    position: 'absolute',
-    left: 10,
-    top: 10,
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: ui.color.surface,
-    borderWidth: 1.5,
-    borderColor: ui.color.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 20,
-    ...ui.shadow.float,
-  },
-  sidePlusRight: {
-    position: 'absolute',
-    right: 10,
-    top: 10,
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: ui.color.surface,
-    borderWidth: 1.5,
-    borderColor: ui.color.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 20,
-    ...ui.shadow.float,
-  },
-  sidePlusHintLeft: {
-    position: 'absolute',
-    left: 8,
-    top: 58,
-    color: ui.color.label,
-    fontSize: 11,
-    fontWeight: ui.weight.label,
-    backgroundColor: 'rgba(255,255,255,0.96)',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: ui.color.border,
-    zIndex: 20,
-  },
-  sidePlusHintRight: {
-    position: 'absolute',
-    right: 8,
-    top: 58,
-    color: ui.color.label,
-    fontSize: 11,
-    fontWeight: ui.weight.label,
-    backgroundColor: 'rgba(255,255,255,0.96)',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: ui.color.border,
-    zIndex: 20,
-  },
-  sidePlusText: {
-    color: ui.color.text,
-    fontSize: 22,
-    fontWeight: ui.weight.heading,
-    marginTop: -2,
   },
   zoomBox: {
     position: 'absolute',

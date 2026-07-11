@@ -1,15 +1,16 @@
 /**
  * SDD 참고 4세대 고정 포맷 템플릿
  *
- *  1세대 조부모    [할아버지]──[할머니]
+ *  1세대 조부모    [친조부모] [외조부모]
  *  2세대 부모      [아버지]──[어머니]
- *  3세대 형제자매  [형]─[형수] [나]─[배우자] [누나]─[매형] [여동생]─[매제] [남동생]─[제수]
+ *  3세대 형제자매  [형]─[형수] [나]─[배우자] ...
  *  4세대 자녀      각 부부 아래 자녀
+ *  5세대 손자      (self 뷰 기본 템플릿)
  *
  * 친가·외가·배우자 집안은 같은 슬롯 구조, 인물 데이터만 독립.
  */
 
-import type { ActiveView, LineageView } from '../types/lineage';
+import type { ActiveView } from '../types/lineage';
 import type { GenderType, Person, PersonId } from '../types/pedigree';
 import { nowIso } from './date';
 
@@ -31,6 +32,8 @@ export type TemplateSlotIds = {
   ggm: PersonId;
   gf: PersonId;
   gm: PersonId;
+  mgf: PersonId;
+  mgm: PersonId;
   father: PersonId;
   mother: PersonId;
   siblings: Array<{ blood: PersonId; spouse: PersonId }>;
@@ -50,6 +53,8 @@ export function slotIdsForView(view: ActiveView): TemplateSlotIds {
     ggm: `${p}_ggm`,
     gf: `${p}_gf`,
     gm: `${p}_gm`,
+    mgf: `${p}_mgf`,
+    mgm: `${p}_mgm`,
     father: `${p}_father`,
     mother: `${p}_mother`,
     siblings,
@@ -71,6 +76,8 @@ type DefaultNames = {
   ggm: string;
   gf: string;
   gm: string;
+  mgf: string;
+  mgm: string;
   father: string;
   mother: string;
   siblings: Array<{ blood: string; spouse: string; bloodGender: GenderType; spouseGender: GenderType }>;
@@ -82,18 +89,20 @@ const SELF_NAMES: DefaultNames = {
   ggm: '증조할머니',
   gf: '친할아버지',
   gm: '친할머니',
+  mgf: '외할아버지',
+  mgm: '외할머니',
   father: '아버지',
   mother: '어머니',
   siblings: [
     { blood: '형', spouse: '형수', bloodGender: 'male', spouseGender: 'female' },
-    { blood: '큰아버지', spouse: '큰어머니', bloodGender: 'male', spouseGender: 'female' },
+    { blood: '큰형', spouse: '형수', bloodGender: 'male', spouseGender: 'female' },
     { blood: '나', spouse: '배우자', bloodGender: 'unknown', spouseGender: 'unknown' },
     { blood: '누나', spouse: '매형', bloodGender: 'female', spouseGender: 'male' },
     { blood: '남동생', spouse: '제수', bloodGender: 'male', spouseGender: 'female' },
   ],
   children: [
     ['형의 아들', '형의 딸'],
-    ['큰아버지의 아들', '큰아버지의 딸'],
+    ['큰형의 아들', '큰형의 딸'],
     ['나의 아들', '나의 딸'],
     ['누나의 아들', '누나의 딸'],
     ['남동생의 아들', '남동생의 딸'],
@@ -105,20 +114,22 @@ const PATERNAL_NAMES: DefaultNames = {
   ggm: '고조할머니',
   gf: '증조할아버지',
   gm: '증조할머니',
+  mgf: '외증조할아버지',
+  mgm: '외증조할머니',
   father: '친할아버지',
   mother: '친할머니',
   siblings: [
     { blood: '형', spouse: '형수', bloodGender: 'male', spouseGender: 'female' },
     { blood: '큰아버지', spouse: '큰어머니', bloodGender: 'male', spouseGender: 'female' },
     { blood: '아버지', spouse: '어머니', bloodGender: 'male', spouseGender: 'female' },
-    { blood: '누나', spouse: '매형', bloodGender: 'female', spouseGender: 'male' },
+    { blood: '고모', spouse: '고모부', bloodGender: 'female', spouseGender: 'male' },
     { blood: '남동생', spouse: '제수', bloodGender: 'male', spouseGender: 'female' },
   ],
   children: [
     ['형의 아들', '형의 딸'],
     ['큰아버지의 아들', '큰아버지의 딸'],
     ['나의 아들', '나의 딸'],
-    ['누나의 아들', '누나의 딸'],
+    ['고모의 아들', '고모의 딸'],
     ['남동생의 아들', '남동생의 딸'],
   ],
 };
@@ -128,18 +139,20 @@ const MATERNAL_NAMES: DefaultNames = {
   ggm: '외고조할머니',
   gf: '외증조할아버지',
   gm: '외증조할머니',
+  mgf: '외증조할아버지',
+  mgm: '외증조할머니',
   father: '외할아버지',
   mother: '외할머니',
   siblings: [
     { blood: '외가 삼촌', spouse: '삼숙', bloodGender: 'male', spouseGender: 'female' },
-    { blood: '큰이모', spouse: '이모부', bloodGender: 'female', spouseGender: 'male' },
+    { blood: '삼촌', spouse: '숙모', bloodGender: 'male', spouseGender: 'female' },
     { blood: '어머니', spouse: '아버지', bloodGender: 'female', spouseGender: 'male' },
     { blood: '이모', spouse: '이모부', bloodGender: 'female', spouseGender: 'male' },
     { blood: '외가 남동생', spouse: '제수', bloodGender: 'male', spouseGender: 'female' },
   ],
   children: [
     ['삼촌의 아들', '삼촌의 딸'],
-    ['큰이모의 아들', '큰이모의 딸'],
+    ['삼촌의 아들', '삼촌의 딸'],
     ['나의 아들', '나의 딸'],
     ['이모의 아들', '이모의 딸'],
     ['남동생의 아들', '남동생의 딸'],
@@ -151,6 +164,8 @@ const SPOUSE_NAMES: DefaultNames = {
   ggm: '배우자 증조할머니',
   gf: '배우자 할아버지',
   gm: '배우자 할머니',
+  mgf: '배우자 외할아버지',
+  mgm: '배우자 외할머니',
   father: '배우자 아버지',
   mother: '배우자 어머니',
   siblings: [
@@ -194,11 +209,20 @@ export function createViewTemplate(
   const names = NAMES_BY_VIEW[view];
   const out: Record<PersonId, Person> = {};
 
+  // 증조는 기본 템플릿에 노드를 만들지 않음. 친할아버지에만 링크를 달아 추가 가능하게 함.
   out[slots.gf] = person(slots.gf, names.gf, createdAt, 'male', {
     spouseId: slots.gm,
+    fatherId: slots.ggf,
+    motherId: slots.ggm,
   });
   out[slots.gm] = person(slots.gm, names.gm, createdAt, 'female', {
     spouseId: slots.gf,
+  });
+  out[slots.mgf] = person(slots.mgf, names.mgf, createdAt, 'male', {
+    spouseId: slots.mgm,
+  });
+  out[slots.mgm] = person(slots.mgm, names.mgm, createdAt, 'female', {
+    spouseId: slots.mgf,
   });
 
   out[slots.father] = person(slots.father, names.father, createdAt, 'male', {
@@ -208,8 +232,8 @@ export function createViewTemplate(
   });
   out[slots.mother] = person(slots.mother, names.mother, createdAt, 'female', {
     spouseId: slots.father,
-    fatherId: slots.gf,
-    motherId: slots.gm,
+    fatherId: slots.mgf,
+    motherId: slots.mgm,
   });
 
   slots.siblings.forEach((pair, i) => {
@@ -237,6 +261,22 @@ export function createViewTemplate(
     });
   });
 
+  if (view === 'self') {
+    // 5열 기본 손자 템플릿: 각 섹션(형제 라인)마다 1명씩
+    slots.children.forEach((childIds, si) => {
+      const parentChildId = childIds[0];
+      if (!out[parentChildId]) return;
+      const gcId = `${VIEW_PREFIX[view]}_gc${si}_0`;
+      const gcName =
+        si === SELF_SLOT_INDEX ? '나의 손자' : `${names.siblings[si].blood}의 손자`;
+      const parentLink =
+        out[parentChildId].gender === 'female'
+          ? { motherId: parentChildId }
+          : { fatherId: parentChildId };
+      out[gcId] = person(gcId, gcName, createdAt, 'male', parentLink);
+    });
+  }
+
   return out;
 }
 
@@ -251,6 +291,14 @@ export function reconcileViewTemplate(
   const fresh = createViewTemplate(view);
   const slots = slotIdsForView(view);
   const out: Record<PersonId, Person> = { ...people };
+  const legacySelfRename: Record<PersonId, { from: string; to: string }> =
+    view === 'self'
+      ? {
+          [slots.siblings[1].blood]: { from: '큰아버지', to: '큰형' },
+          [slots.children[1][0]]: { from: '큰아버지의 아들', to: '큰형의 아들' },
+          [slots.children[1][1]]: { from: '큰아버지의 딸', to: '큰형의 딸' },
+        }
+      : {};
 
   for (const [id, template] of Object.entries(fresh)) {
     const existing = out[id];
@@ -265,6 +313,9 @@ export function reconcileViewTemplate(
       fatherId: template.fatherId,
       motherId: template.motherId,
       spouseId: existing.spouseId ?? template.spouseId,
+      ...(legacySelfRename[id] && existing.name === legacySelfRename[id].from
+        ? { name: legacySelfRename[id].to }
+        : {}),
     };
   }
 
@@ -350,9 +401,9 @@ export function migrateLegacyToStore(
     }
   }
 
-  for (const [id, person] of Object.entries(legacy)) {
+  for (const [id, legacyPerson] of Object.entries(legacy)) {
     if (!map.some(([o]) => o === id) && id !== 'self') {
-      selfData[id] = person;
+      selfData[id] = legacyPerson;
     }
   }
 

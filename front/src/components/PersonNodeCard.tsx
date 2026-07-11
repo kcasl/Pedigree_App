@@ -25,6 +25,18 @@ type FallbackAvatarTheme = {
   border: string;
 };
 
+function formatPhoneForNode(phone?: string): string {
+  if (!phone) return '';
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length === 11) {
+    return `${digits.slice(0, 3)}-${digits.slice(3, 7)}-${digits.slice(7)}`;
+  }
+  if (digits.length === 10) {
+    return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
+  }
+  return phone;
+}
+
 function fallbackAvatarTheme(gender?: Person['gender']): FallbackAvatarTheme {
   if (gender === 'male') {
     return {
@@ -91,7 +103,7 @@ export function PersonNodeCard({ label, person, onPress, style, highlighted, gen
         </Text>
         {person?.phone ? (
           <Text style={styles.sub} numberOfLines={1}>
-            {person.phone}
+            {formatPhoneForNode(person.phone)}
           </Text>
         ) : (
           <Text style={styles.sub} numberOfLines={1}>

@@ -59,12 +59,22 @@ function bar(
   color: string,
   stroke: number,
 ) {
+  if (![x, y, w, h, stroke].every(Number.isFinite)) {
+    return {
+      position: 'absolute' as const,
+      left: 0,
+      top: 0,
+      width: 0,
+      height: 0,
+      backgroundColor: 'transparent',
+    };
+  }
   return {
     position: 'absolute' as const,
-    left: x,
-    top: y,
-    width: Math.max(stroke, w),
-    height: Math.max(stroke, h),
+    left: Math.round(x),
+    top: Math.round(y),
+    width: Math.max(stroke, Math.round(w)),
+    height: Math.max(stroke, Math.round(h)),
     backgroundColor: color,
     borderRadius: stroke / 2,
   };
@@ -169,11 +179,9 @@ function buildGroups(
   return { groups: Array.from(groupMap.values()), drawnCouples };
 }
 
-function railY(parentBottom: number, childTop: number, cfg: typeof EDGE_DRAW_CONFIG): number {
-  const ideal = parentBottom + cfg.spouseLineOffset + cfg.trunkGap;
-  const maxY = childTop - cfg.childGap;
-  if (ideal <= maxY) return ideal;
-  return (parentBottom + childTop) / 2;
+/** 세대 사이 세로 간격을 정확히 이등분한 rail Y (픽셀 스냅) */
+function railY(parentBottom: number, childTop: number, _cfg: typeof EDGE_DRAW_CONFIG): number {
+  return Math.round((parentBottom + childTop) / 2);
 }
 
 type Ctx = {
@@ -198,8 +206,9 @@ function drawCouple(group: CoupleGroup, ctx: Ctx): void {
 
   const leftEdge = left.x + left.width;
   const rightEdge = right.x;
-  const baseY = Math.max(bottom(left), bottom(right)) + cfg.spouseLineOffset;
-  const midX = (leftEdge + rightEdge) / 2;
+  const parentBottom = Math.max(bottom(left), bottom(right));
+  const baseY = parentBottom + cfg.spouseLineOffset;
+  const midX = Math.round((left.x + right.x + right.width) / 2);
 
   const childXs = children.map(cx);
   const minChildX = Math.min(...childXs);
@@ -218,10 +227,10 @@ function drawCouple(group: CoupleGroup, ctx: Ctx): void {
     />,
   );
 
-  const ry = railY(baseY, minChildTop, cfg);
+  const ry = railY(parentBottom, minChildTop, cfg);
 
   out.push(
-    <View key={`c_v_${key}`} style={bar(midX - stroke / 2, baseY, stroke, ry - baseY, parentColor, stroke)} />,
+    <View key={`c_v_${key}`} style={bar(midX - stroke / 2, baseY, stroke, Math.max(stroke, ry - baseY), parentColor, stroke)} />,
   );
 
   const railLeft = Math.min(midX, minChildX);
