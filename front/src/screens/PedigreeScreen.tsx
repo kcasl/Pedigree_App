@@ -967,7 +967,7 @@ export function PedigreeScreen({
         </GestureDetector>
       </View>
 
-      {/* 줌 컨트롤 */}
+      {/* 줌 컨트롤: + / − / 中(중앙 복귀) */}
       <View style={styles.zoomBox}>
         <Pressable style={styles.zoomBtn} onPress={() => zoomBy(1.2)}>
           <Text style={styles.zoomText}>+</Text>
