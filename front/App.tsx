@@ -335,7 +335,7 @@ export default function App() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
-        <StatusBar barStyle="dark-content" backgroundColor={ui.color.surface} />
+        <StatusBar barStyle="dark-content" backgroundColor={ui.color.surface} translucent={false} />
         {isBooting ? (
           <View style={styles.loadingWrap}>
             <ActivityIndicator size="large" color={ui.color.accent} />

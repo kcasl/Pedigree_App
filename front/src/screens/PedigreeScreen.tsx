@@ -3,14 +3,16 @@ import {
   ActivityIndicator,
   Alert,
   Modal,
+  Platform,
   Pressable,
+  StatusBar,
   StyleSheet,
   Text,
   View,
   type LayoutChangeEvent,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
   useAnimatedStyle,
@@ -136,12 +138,23 @@ function inferParentRole(
   return 'father';
 }
 
+function useScreenInsets() {
+  const insets = useSafeAreaInsets();
+  const statusBarHeight = StatusBar.currentHeight ?? 24;
+  const topInset =
+    Platform.OS === 'android'
+      ? Math.min(insets.top, statusBarHeight)
+      : insets.top;
+  return { topInset, bottomInset: insets.bottom };
+}
+
 export function PedigreeScreen({
   auth,
   onRequestLogout,
   onRequestSwitchAccount,
   onRequestLinkGoogle,
 }: Props) {
+  const { topInset, bottomInset } = useScreenInsets();
   const [store, setStore] = useState<PedigreeStore>(createInitialStore);
   const activeView = store.activeView;
   const peopleById = store.views[activeView];
@@ -821,17 +834,27 @@ export function PedigreeScreen({
 
   if (!isHydrated) {
     return (
-      <SafeAreaView style={[styles.safe, { backgroundColor: screenBg }]} edges={['top', 'bottom']}>
+      <View
+        style={[
+          styles.safe,
+          { backgroundColor: screenBg, paddingTop: topInset, paddingBottom: bottomInset },
+        ]}
+      >
         <View style={styles.loadingWrap}>
           <ActivityIndicator size="large" color={ui.color.accent} />
           <Text style={styles.loadingText}>족보 불러오는 중...</Text>
         </View>
-      </SafeAreaView>
+      </View>
     );
   }
 
   return (
-    <SafeAreaView style={[styles.safe, { backgroundColor: screenBg }]} edges={['top', 'bottom']}>
+    <View
+      style={[
+        styles.safe,
+        { backgroundColor: screenBg, paddingTop: topInset, paddingBottom: bottomInset },
+      ]}
+    >
       <View style={[styles.header, { backgroundColor: screenBg }]}>
         <View style={styles.headerTopRow}>
           <View style={styles.headerTitleWrap}>
@@ -847,13 +870,13 @@ export function PedigreeScreen({
               </Pressable>
             ) : null}
             <Pressable style={styles.settingsBtn} onPress={() => setContactsVisible(true)}>
-              <Text style={styles.settingsBtnText}>연락처 모아보기</Text>
+              <Text style={styles.settingsBtnText}>연락처</Text>
             </Pressable>
             <Pressable style={styles.settingsBtn} onPress={() => setSettingsVisible(true)}>
               <Text style={styles.settingsBtnText}>설정</Text>
             </Pressable>
             <Pressable style={styles.settingsBtn} onPress={() => setUsageVisible(true)}>
-              <Text style={styles.settingsBtnText}>사용법 보기</Text>
+              <Text style={styles.settingsBtnText}>사용법</Text>
             </Pressable>
           </View>
         </View>
@@ -1203,7 +1226,7 @@ export function PedigreeScreen({
           </Pressable>
         </Pressable>
       </Modal>
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -1223,9 +1246,9 @@ const styles = StyleSheet.create({
     fontWeight: ui.weight.label,
   },
   header: {
-    paddingHorizontal: 16,
-    paddingTop: 12,
-    paddingBottom: 8,
+    paddingHorizontal: 12,
+    paddingTop: 4,
+    paddingBottom: 4,
     borderBottomWidth: 1,
     borderBottomColor: 'rgba(0,0,0,0.06)',
     zIndex: 10,
@@ -1233,11 +1256,11 @@ const styles = StyleSheet.create({
   },
   headerTitle: {
     color: ui.color.text,
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: ui.weight.heading,
   },
   viewBadge: {
-    marginTop: 4,
+    marginTop: 2,
     alignSelf: 'flex-start',
     paddingHorizontal: 8,
     paddingVertical: 3,
@@ -1249,16 +1272,19 @@ const styles = StyleSheet.create({
   },
   headerTopRow: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     justifyContent: 'space-between',
+    gap: 8,
   },
   headerTitleWrap: {
     flex: 1,
+    minWidth: 0,
   },
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    flexShrink: 0,
+    gap: 4,
   },
   selfReturnBtn: {
     borderRadius: 10,
@@ -1274,20 +1300,20 @@ const styles = StyleSheet.create({
     fontWeight: ui.weight.title,
   },
   settingsBtn: {
-    borderRadius: 10,
+    borderRadius: 8,
     borderWidth: 1,
     borderColor: ui.color.border,
     backgroundColor: ui.color.surface,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
   },
   settingsBtnText: {
     color: ui.color.text,
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: ui.weight.title,
   },
   syncText: {
-    marginTop: 6,
+    marginTop: 2,
     color: ui.color.textMuted,
     fontSize: 11,
     fontWeight: ui.weight.label,
