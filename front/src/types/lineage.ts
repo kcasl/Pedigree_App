@@ -18,10 +18,10 @@ export const ACTIVE_VIEW_LABEL: Record<ActiveView, string> = {
 };
 
 export const ACTIVE_VIEW_BG: Record<ActiveView, string> = {
-  self: '#faf8f5',
-  paternal: '#e3f2fd',
-  maternal: '#fce4ec',
-  spouse: '#f1f8e9',
+  self: '#f5f0e6',
+  paternal: '#c8e3fc',
+  maternal: '#f8c4d8',
+  spouse: '#c8e6c0',
 };
 
 /** @deprecated */

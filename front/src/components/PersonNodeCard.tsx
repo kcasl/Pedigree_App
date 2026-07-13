@@ -41,22 +41,22 @@ function formatPhoneForNode(phone?: string): string {
 function fallbackAvatarTheme(gender?: Person['gender']): FallbackAvatarTheme {
   if (gender === 'male') {
     return {
-      bg: '#EDF5FF',
-      fg: '#7FA8D8',
-      border: '#D3E4FA',
+      bg: '#C5DBFA',
+      fg: '#3B6EA8',
+      border: '#8EB4E8',
     };
   }
   if (gender === 'female') {
     return {
-      bg: '#F6EEFF',
-      fg: '#A47CCF',
-      border: '#E2D2F6',
+      bg: '#E8CFF8',
+      fg: '#7A3FA8',
+      border: '#C89AE8',
     };
   }
   return {
-    bg: '#EFF4FA',
-    fg: '#8B9AAF',
-    border: '#D7E1ED',
+    bg: '#D2DCE8',
+    fg: '#4A5E78',
+    border: '#9AADBE',
   };
 }
 
