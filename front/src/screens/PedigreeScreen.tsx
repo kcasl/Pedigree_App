@@ -36,6 +36,7 @@ import {
   savePedigreeStore,
 } from '../storage/pedigreeStorage';
 import { nowIso } from '../utils/date';
+import { buildKinshipLabels } from '../utils/kinship';
 import { buildSiblingKinshipLabels } from '../utils/siblingKinship';
 import { normalizePhoneDigits } from '../utils/phone';
 import {
@@ -500,14 +501,15 @@ export function PedigreeScreen({
   }, [store.views]);
 
   const kinshipLabelById = useMemo(() => {
+    if (activeView === 'self') {
+      const labels = buildKinshipLabels(peopleById, slots.selfId);
+      const siblingBloodIds = slots.siblings.map(s => s.blood);
+      Object.assign(labels, buildSiblingKinshipLabels(peopleById, slots.selfId, siblingBloodIds));
+      return labels;
+    }
     const labels: Record<PersonId, string> = {};
     for (const id of Object.keys(peopleById)) {
       labels[id] = roleLabel(activeView, id);
-    }
-    if (activeView === 'self') {
-      const siblingBloodIds = slots.siblings.map(s => s.blood);
-      const siblingLabels = buildSiblingKinshipLabels(peopleById, slots.selfId, siblingBloodIds);
-      Object.assign(labels, siblingLabels);
     }
     return labels;
   }, [peopleById, activeView, slots]);
