@@ -1,4 +1,6 @@
+import type { ActiveView } from '../types/lineage';
 import type { Person, PersonId } from '../types/pedigree';
+import { slotIdsForView } from './standardTemplate';
 
 export type AgeRelation = 'older' | 'younger' | 'same' | 'unknown';
 
@@ -102,6 +104,23 @@ export function defaultSelfSiblingCoupleOrder(
   return { couples: ordered, focalIndex: focalIndex >= 0 ? focalIndex : 0 };
 }
 
+/** 뷰별 형제 줄 기본 순서 (생년월일 없을 때) */
+export function defaultSiblingBloodOrder(
+  view: ActiveView,
+  slots: ReturnType<typeof slotIdsForView>,
+): PersonId[] {
+  if (view === 'self' || view === 'spouse') {
+    return [
+      slots.siblings[1].blood,
+      slots.siblings[0].blood,
+      slots.siblings[3].blood,
+      slots.selfId,
+      slots.siblings[4].blood,
+    ];
+  }
+  return [slots.siblings[1].blood, slots.selfId, slots.siblings[3].blood];
+}
+
 /** 나를 중앙에 두고, 생년월일 기준 연장자는 왼쪽·후배는 오른쪽. */
 export function orderSiblingCouplesAroundFocal(
   couples: SiblingCouple[],
@@ -115,7 +134,7 @@ export function orderSiblingCouplesAroundFocal(
 
   if (!selfPerson || !shouldReorderByBirthDate(selfPerson, others)) {
     if (templateBloodOrder?.length) {
-      return defaultSelfSiblingCoupleOrder(couples, focalId, templateBloodOrder);
+      return defaultSelfSiblingCoupleOrder(present, focalId, templateBloodOrder);
     }
     const focal = present.find(c => c.blood === focalId);
     const focalIndex = present.findIndex(c => c.blood === focalId);

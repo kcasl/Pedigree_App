@@ -36,7 +36,7 @@ import {
   savePedigreeStore,
 } from '../storage/pedigreeStorage';
 import { nowIso } from '../utils/date';
-import { buildViewKinshipLabels, buildViewOrdinalLabels, syncAllViews, syncStoreAfterEdit } from '../utils/viewSync';
+import { buildViewKinshipLabels, buildViewOrdinalLabels, canAddSiblingFromNode, nextEmptySiblingSlotId, resolveSiblingAdd, syncAllViews, syncStoreAfterEdit } from '../utils/viewSync';
 import { normalizePhoneDigits } from '../utils/phone';
 import {
   createDefaultStore,
@@ -383,10 +383,19 @@ export function PedigreeScreen({
   };
 
   const layout = useMemo(() => {
-    return buildStandardPedigreeLayout(peopleById, {
-      ...STANDARD_LAYOUT_DEFAULTS,
-      view: activeView,
-    });
+    try {
+      return buildStandardPedigreeLayout(peopleById, {
+        ...STANDARD_LAYOUT_DEFAULTS,
+        view: activeView,
+      });
+    } catch (error) {
+      console.warn('[PedigreeScreen] layout failed', error);
+      const fallback = createDefaultStore().views[activeView];
+      return buildStandardPedigreeLayout(fallback, {
+        ...STANDARD_LAYOUT_DEFAULTS,
+        view: activeView,
+      });
+    }
   }, [peopleById, activeView]);
 
   const displayLayout = useMemo(() => {
@@ -451,7 +460,7 @@ export function PedigreeScreen({
           name: person.name?.trim() || '이름 없음',
           phone: digits,
           viewLabel: ACTIVE_VIEW_LABEL[view],
-          kinshipLabel: buildViewKinshipLabels(view, store.views[view])[person.id] ?? person.name,
+          kinshipLabel: buildViewKinshipLabels(view, store.views[view], store.views.self)[person.id] ?? person.name,
         });
       }
     }
@@ -460,8 +469,8 @@ export function PedigreeScreen({
   }, [store.views]);
 
   const kinshipLabelById = useMemo(
-    () => buildViewKinshipLabels(activeView, peopleById),
-    [peopleById, activeView],
+    () => buildViewKinshipLabels(activeView, peopleById, store.views.self),
+    [peopleById, activeView, store.views.self],
   );
 
   const ordinalLabelById = useMemo(
@@ -673,11 +682,15 @@ export function PedigreeScreen({
           }
         }
       } else if (action.kind === 'sibling') {
-        const base = next[action.ofId];
-        next[person.id] = {
-          ...next[person.id],
-          ...(base?.fatherId ? { fatherId: base.fatherId } : {}),
-          ...(base?.motherId ? { motherId: base.motherId } : {}),
+        const resolved = resolveSiblingAdd(activeView, next, action.ofId);
+        if (!resolved) return prev;
+        const slotId = nextEmptySiblingSlotId(activeView, next, resolved);
+        const finalId = slotId ?? person.id;
+        next[finalId] = {
+          ...person,
+          id: finalId,
+          ...(resolved.fatherId ? { fatherId: resolved.fatherId } : {}),
+          ...(resolved.motherId ? { motherId: resolved.motherId } : {}),
         };
       } else if (action.kind === 'child') {
         const parent = next[action.parentId];
@@ -835,20 +848,22 @@ export function PedigreeScreen({
             </Text>
           </View>
           <View style={styles.headerActions}>
-            {activeView !== 'self' ? (
-              <Pressable style={styles.selfReturnBtn} onPress={switchToSelfView}>
-                <Text style={styles.selfReturnBtnText}>나 시점</Text>
-              </Pressable>
-            ) : null}
             <Pressable style={styles.settingsBtn} onPress={() => setContactsVisible(true)}>
               <Text style={styles.settingsBtnText}>연락처</Text>
             </Pressable>
             <Pressable style={styles.settingsBtn} onPress={() => setSettingsVisible(true)}>
               <Text style={styles.settingsBtnText}>설정</Text>
             </Pressable>
-            <Pressable style={styles.settingsBtn} onPress={() => setUsageVisible(true)}>
-              <Text style={styles.settingsBtnText}>사용법</Text>
-            </Pressable>
+            <View style={styles.headerActionColumn}>
+              <Pressable style={styles.settingsBtn} onPress={() => setUsageVisible(true)}>
+                <Text style={styles.settingsBtnText}>사용법</Text>
+              </Pressable>
+              {activeView !== 'self' ? (
+                <Pressable style={styles.selfReturnBtn} onPress={switchToSelfView}>
+                  <Text style={styles.selfReturnBtnText}>나 시점</Text>
+                </Pressable>
+              ) : null}
+            </View>
           </View>
         </View>
         <Text style={styles.syncText}>
@@ -1028,15 +1043,17 @@ export function PedigreeScreen({
               <Text style={styles.sheetItemText}>모(어머니) 추가</Text>
             </Pressable>
 
-            <Pressable
-              style={styles.sheetItem}
-              onPress={() => {
-                setActionVisible(false);
-                setPendingAdd({ kind: 'sibling', ofId: selectedId });
-              }}
-            >
-              <Text style={styles.sheetItemText}>형제/자매 추가(같은 줄)</Text>
-            </Pressable>
+            {canAddSiblingFromNode(activeView, selectedId) ? (
+              <Pressable
+                style={styles.sheetItem}
+                onPress={() => {
+                  setActionVisible(false);
+                  setPendingAdd({ kind: 'sibling', ofId: selectedId });
+                }}
+              >
+                <Text style={styles.sheetItemText}>형제/자매 추가(같은 줄)</Text>
+              </Pressable>
+            ) : null}
 
             <Pressable
               style={styles.sheetItem}
@@ -1187,14 +1204,26 @@ export function PedigreeScreen({
             <Text style={styles.settingsSubDesc}>
               부모/형제/배우자/자녀 추가, 정보 수정/삭제를 카드별로 실행할 수 있습니다.
             </Text>
-            <Text style={styles.settingsDesc}>2) 시점 전환</Text>
-            <Text style={styles.settingsSubDesc}>
-              아버지/어머니/배우자 카드에서 해당 집안 시점으로 전환할 수 있습니다.
-            </Text>
-            <Text style={styles.settingsDesc}>3) 이동/확대</Text>
+            {activeView === 'self' ? (
+              <>
+                <Text style={styles.settingsDesc}>2) 시점 전환</Text>
+                <Text style={styles.settingsSubDesc}>
+                  아버지/어머니/배우자 카드에서 해당 집안 시점으로 전환할 수 있습니다.
+                </Text>
+              </>
+            ) : null}
+            <Text style={styles.settingsDesc}>{activeView === 'self' ? '3' : '2'}) 이동/확대</Text>
             <Text style={styles.settingsSubDesc}>
               핀치로 확대/축소, 드래그로 화면을 이동할 수 있습니다.
             </Text>
+            {activeView !== 'self' ? (
+              <>
+                <Text style={styles.settingsDesc}>3) 나 시점 버튼</Text>
+                <Text style={styles.settingsSubDesc}>
+                  오른쪽 위 「나 시점」 버튼을 누르면 나 시점으로 돌아갑니다.
+                </Text>
+              </>
+            ) : null}
             <Pressable style={styles.settingsCloseBtn} onPress={() => setUsageVisible(false)}>
               <Text style={styles.settingsCloseBtnText}>닫기</Text>
             </Pressable>
@@ -1257,21 +1286,26 @@ const styles = StyleSheet.create({
   },
   headerActions: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     flexShrink: 0,
     gap: 4,
   },
+  headerActionColumn: {
+    alignItems: 'stretch',
+    gap: 4,
+  },
   selfReturnBtn: {
-    borderRadius: 10,
+    borderRadius: 8,
     borderWidth: 1,
     borderColor: '#2e7d32',
     backgroundColor: '#f1f8e9',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    alignItems: 'center',
   },
   selfReturnBtnText: {
     color: '#1b5e20',
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: ui.weight.title,
   },
   settingsBtn: {

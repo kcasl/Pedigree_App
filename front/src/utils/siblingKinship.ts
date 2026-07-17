@@ -44,11 +44,13 @@ function spouseLabelBySiblingRelation(
 ): string {
   if (rel === 'older') {
     if (siblingGender === 'male') return '형수';
-    if (siblingGender === 'female') return selfGender === 'female' ? '형부' : '매형';
+    if (siblingGender === 'female') {
+      return selfGender === 'female' ? '형부' : '매형';
+    }
   }
   if (rel === 'younger') {
     if (siblingGender === 'male') return '제수';
-    if (siblingGender === 'female') return '동서';
+    if (siblingGender === 'female') return '매제';
   }
   return '인척';
 }

@@ -345,6 +345,7 @@ export function reconcileViewTemplate(
     const edgeIdx = [0, 4] as const;
     edgeIdx.forEach(i => {
       const pair = slots.siblings[i];
+      if (out[pair.blood]) return;
       delete out[pair.blood];
       delete out[pair.spouse];
       const kids = slots.children[i] ?? [];

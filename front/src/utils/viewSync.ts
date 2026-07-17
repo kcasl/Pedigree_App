@@ -354,33 +354,181 @@ export function syncStoreAfterEdit(
   return syncAllViews({ ...store, views });
 }
 
-/** 뷰별 형제 줄 기본 순서 (생년월일 없을 때) */
-export function defaultSiblingBloodOrder(
+/** 친가/외가·배우자 집안에서 실제 "나"(self 뷰 본인)에 해당하는 blood id */
+export function resolveUserBloodIdInView(
   view: ActiveView,
-  slots: ReturnType<typeof slotIdsForView>,
-): PersonId[] {
-  if (view === 'self' || view === 'spouse') {
-    return [
-      slots.siblings[1].blood,
-      slots.siblings[0].blood,
-      slots.siblings[3].blood,
-      slots.selfId,
-      slots.siblings[4].blood,
-    ];
+  selfPeople: Record<PersonId, Person>,
+  viewPeople: Record<PersonId, Person>,
+): PersonId | null {
+  const me = slotIdsForView('self');
+  if (view === 'self') return me.selfId;
+
+  if (view === 'spouse') {
+    const spo = slotIdsForView('spouse');
+    return viewPeople[spo.spouseId] ? spo.spouseId : null;
   }
-  return [slots.siblings[1].blood, slots.selfId, slots.siblings[3].blood];
+
+  if (view === 'paternal' || view === 'maternal') {
+    const siblingIds = getSelfSiblingBloodIds(selfPeople);
+    const userIndex = siblingIds.indexOf(me.selfId);
+    if (userIndex < 0) return null;
+    const targetId = focalChildTargetId(view, userIndex);
+    return viewPeople[targetId] ? targetId : null;
+  }
+
+  return null;
+}
+
+export type SiblingAddTarget = 'blood' | 'couple_child';
+
+export type SiblingAddResolution = {
+  fatherId?: PersonId;
+  motherId?: PersonId;
+  /** couple_child → 부모 부부의 자녀(형제 줄), blood → 선택 인물과 같은 부모 */
+  target: SiblingAddTarget;
+};
+
+/** 친가/외가 — 형제 추가 허용 노드 (조부모·부모 줄만, 형제 줄은 제외) */
+export function canAddSiblingFromNode(view: ActiveView, ofId: PersonId): boolean {
+  if (view === 'self' || view === 'spouse') return true;
+  if (view !== 'paternal' && view !== 'maternal') return true;
+  const slots = slotIdsForView(view);
+  const allowed = new Set<PersonId>([
+    slots.father,
+    slots.mother,
+    slots.gf,
+    slots.gm,
+    slots.mgf,
+    slots.mgm,
+    slots.ggf,
+    slots.ggm,
+  ]);
+  return allowed.has(ofId);
+}
+
+/**
+ * 형제 추가 시 부모·대상 줄 결정.
+ * - 부모 줄 칭할아버지·칭할머니: 각각 친형제 → 왼/오른쪽
+ * - 조부모·외조부모: 각 카드의 친형제 → 해당 조부모 옆(좌/우)
+ */
+export function resolveSiblingAdd(
+  view: ActiveView,
+  people: Record<PersonId, Person>,
+  ofId: PersonId,
+): SiblingAddResolution | null {
+  const slots = slotIdsForView(view);
+  const person = people[ofId];
+  if (!person) return null;
+
+  if (view === 'paternal' || view === 'maternal') {
+    if (ofId === slots.father || ofId === slots.mother) {
+      if (!person.fatherId || !person.motherId) return null;
+      return {
+        fatherId: person.fatherId,
+        motherId: person.motherId,
+        target: 'blood',
+      };
+    }
+    if (
+      ofId === slots.gf ||
+      ofId === slots.gm ||
+      ofId === slots.mgf ||
+      ofId === slots.mgm ||
+      ofId === slots.ggf ||
+      ofId === slots.ggm
+    ) {
+      if (!person.fatherId || !person.motherId) return null;
+      return {
+        fatherId: person.fatherId,
+        motherId: person.motherId,
+        target: 'blood',
+      };
+    }
+    return null;
+  }
+
+  return {
+    fatherId: person.fatherId,
+    motherId: person.motherId,
+    target: 'blood',
+  };
+}
+
+/** @deprecated resolveSiblingAdd 사용 */
+export function resolveSiblingParentIds(
+  view: ActiveView,
+  people: Record<PersonId, Person>,
+  ofId: PersonId,
+): { fatherId?: PersonId; motherId?: PersonId } {
+  const resolved = resolveSiblingAdd(view, people, ofId);
+  if (!resolved) return {};
+  return { fatherId: resolved.fatherId, motherId: resolved.motherId };
+}
+
+/** 아버지·어머니(형제 줄) 자녀일 때만 템플릿 형제 슬롯 사용 */
+export function nextEmptySiblingSlotId(
+  view: ActiveView,
+  people: Record<PersonId, Person>,
+  resolution: SiblingAddResolution | { fatherId?: PersonId; motherId?: PersonId },
+): PersonId | null {
+  const slots = slotIdsForView(view);
+  if ('target' in resolution && resolution.target !== 'couple_child') {
+    return null;
+  }
+  const parents = resolution;
+  if (parents.fatherId !== slots.father || parents.motherId !== slots.mother) {
+    return null;
+  }
+  const focalSlot = SELF_SLOT_INDEX;
+  const order =
+    view === 'paternal' || view === 'maternal'
+      ? [0, 1, 3, 4, focalSlot]
+      : [0, 1, 2, 3, 4];
+
+  for (const i of order) {
+    const id = slots.siblings[i]?.blood;
+    if (id && !people[id]) return id;
+  }
+  return null;
+}
+
+function getFocalChildBloodIds(
+  view: LineageFocalView,
+  peopleById: Record<PersonId, Person>,
+): PersonId[] {
+  const slots = slotIdsForView(view);
+  const { fatherId, motherId } = focalCoupleParentIds(view, slots);
+  return sortIdsByBirth(
+    collectCoupleChildren(peopleById, fatherId, motherId),
+    peopleById,
+  );
 }
 
 export function buildViewKinshipLabels(
   view: ActiveView,
   peopleById: Record<PersonId, Person>,
+  selfPeopleById?: Record<PersonId, Person>,
 ): Record<PersonId, string> {
   const slots = slotIdsForView(view);
   const focalId = slots.selfId;
+  const selfRef = selfPeopleById ?? (view === 'self' ? peopleById : undefined);
 
   const labels = buildKinshipLabels(peopleById, focalId);
   const siblingBloodIds = slots.siblings.map(s => s.blood).filter(id => peopleById[id]);
   Object.assign(labels, buildSiblingKinshipLabels(peopleById, focalId, siblingBloodIds));
+
+  if (selfRef) {
+    const userBloodId = resolveUserBloodIdInView(view, selfRef, peopleById);
+
+    if ((view === 'paternal' || view === 'maternal') && userBloodId && peopleById[userBloodId]) {
+      const focalChildren = getFocalChildBloodIds(view, peopleById);
+      Object.assign(
+        labels,
+        buildSiblingKinshipLabels(peopleById, userBloodId, focalChildren),
+      );
+      labels[userBloodId] = '본인';
+    }
+  }
 
   if (view === 'spouse') {
     const meId = slots.spouseId;

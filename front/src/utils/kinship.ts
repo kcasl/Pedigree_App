@@ -285,9 +285,11 @@ export function buildKinshipLabels(
     const codes = shortestCodes(adj, selfId, id);
     let label = bestLabel(codes, self, target);
 
-    const bloodSpouse = target.spouseId ? peopleById[target.spouseId] : undefined;
-    if (bloodSpouse && isSiblingBlood(self, bloodSpouse)) {
-      label = siblingSpouseLabel(self, bloodSpouse);
+    const bloodRelative =
+      (target.spouseId && peopleById[target.spouseId]) ||
+      undefined;
+    if (bloodRelative && isSiblingBlood(self, bloodRelative)) {
+      label = siblingSpouseLabel(self, bloodRelative);
     }
 
     out[id] = label;

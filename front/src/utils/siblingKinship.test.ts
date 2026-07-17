@@ -35,7 +35,7 @@ describe('siblingKinship female self', () => {
     expect(siblingSpouseLabel(self, olderBrother)).toBe('형수');
     expect(siblingSpouseLabel(self, olderSister)).toBe('형부');
     expect(siblingSpouseLabel(self, youngerBrother)).toBe('제수');
-    expect(siblingSpouseLabel(self, youngerSister)).toBe('동서');
+    expect(siblingSpouseLabel(self, youngerSister)).toBe('매제');
   });
 });
 
@@ -51,6 +51,11 @@ describe('siblingKinship male self', () => {
 
   it('uses 매형 for older sister spouse when self is male', () => {
     expect(siblingSpouseLabel(self, olderSister)).toBe('매형');
+  });
+
+  it('uses 매제 for younger sister spouse when self is male', () => {
+    const youngerSister = person('ys', 'female', '2000-12-01');
+    expect(siblingSpouseLabel(self, youngerSister)).toBe('매제');
   });
 });
 
